@@ -1,60 +1,50 @@
 //! Copyright The KCL Authors. All rights reserved.
 
+// C ABI opaque-pointer types exposed to the cdylib (Go consumes these via cgo).
+// The LLVM IR annotations that used to accompany these were removed when the
+// LLVM codegen path was deleted upstream.
+
 // api-spec:       kcl_context_t
 // api-spec(c):    typedef struct kcl_context_t kcl_context_t;
-// api-spec(llvm): %"kcl_context_t" = type { i8* }
 
 // api-spec:       kcl_eval_scope_t
 // api-spec(c):    typedef struct kcl_eval_scope_t kcl_eval_scope_t;
-// api-spec(llvm): %"kcl_eval_scope_t" = type { i8* }
 
 // api-spec:       kcl_type_t
 // api-spec(c):    typedef struct kcl_type_t kcl_type_t;
-// api-spec(llvm): %"kcl_type_t" = type { i8* }
 
 // api-spec:       kcl_value_t
 // api-spec(c):    typedef struct kcl_value_t kcl_value_t;
-// api-spec(llvm): %"kcl_value_t" = type { i8* }
 
 // api-spec:       kcl_value_ref_t
 // api-spec(c):    typedef struct kcl_value_ref_t kcl_value_ref_t;
-// api-spec(llvm): %"kcl_value_ref_t" = type { i8* }
 
 // api-spec:       kcl_iterator_t
 // api-spec(c):    typedef struct kcl_iterator_t kcl_iterator_t;
-// api-spec(llvm): %"kcl_iterator_t" = type { i8* }
 
 // api-spec:       kcl_buffer_t
 // api-spec(c):    typedef struct kcl_buffer_t kcl_buffer_t;
-// api-spec(llvm): %"kcl_buffer_t" = type { i8* }
 
 // api-spec:       kcl_kind_t
 // api-spec(c):    typedef enum kcl_kind_t kcl_kind_t;
-// api-spec(llvm): %"kcl_kind_t" = type i32
 
 // api-spec:       kcl_size_t
 // api-spec(c):    typedef int32_t kcl_size_t;
-// api-spec(llvm): %"kcl_size_t" = type i32
 
 // api-spec:       kcl_char_t
 // api-spec(c):    typedef char kcl_char_t;
-// api-spec(llvm): %"kcl_char_t" = type i8
 
 // api-spec:       kcl_bool_t
 // api-spec(c):    typedef int8_t kcl_bool_t;
-// api-spec(llvm): %"kcl_bool_t" = type i8
 
 // api-spec:       kcl_int_t
 // api-spec(c):    typedef int64_t kcl_int_t;
-// api-spec(llvm): %"kcl_int_t" = type i64
 
 // api-spec:       kcl_float_t
 // api-spec(c):    typedef double kcl_float_t;
-// api-spec(llvm): %"kcl_float_t" = type double
 
 // api-spec:       kcl_decorator_value_t
 // api-spec(c):    typedef struct kcl_decorator_value_t kcl_decorator_value_t;
-// api-spec(llvm): %"kcl_decorator_value_t" = type opaque
 
 pub mod api;
 pub use self::api::*;
@@ -132,17 +122,4 @@ pub struct RuntimePanicRecord {
     pub rust_file: String,
     pub rust_line: i32,
     pub rust_col: i32,
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-#[repr(C)]
-pub struct FFIRunOptions {
-    pub strict_range_check: i32,
-    pub disable_none: i32,
-    pub disable_schema_check: i32,
-    pub debug_mode: i32,
-    pub show_hidden: i32,
-    pub sort_keys: i32,
-    pub include_schema_type_path: i32,
-    pub disable_empty_list: i32,
 }

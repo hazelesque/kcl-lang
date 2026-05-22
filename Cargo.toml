@@ -14,9 +14,6 @@ rustc_span = { path = "compiler_base/3rdparty/rustc_span", version = "0.1.2" }
 rustc_errors = { path = "compiler_base/3rdparty/rustc_errors", version = "0.1.0" }
 rustc_data_structures = { path = "compiler_base/3rdparty/rustc_data_structures", version = "0.1.2" }
 
-# Legacy
-compiler_base = { path = "crates/compiler_base" }
-
 kcl-api = { path = "crates/api" }
 kcl-ast = { path = "crates/ast" }
 kcl-ast-pretty = { path = "crates/ast_pretty" }
