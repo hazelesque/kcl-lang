@@ -6,11 +6,6 @@
 //! the subset codegen actually consumes — fields, optionality, kind,
 //! plus enough source-location info to cite the schema in generated
 //! rustdoc.
-//!
-//! Phase 4 step 3 lands the full IR construction. Step 2 (this commit)
-//! ships the data model + a minimal extraction that handles primitive
-//! fields only. Subsequent steps fill in lists, dicts, unions,
-//! discriminator annotations, etc.
 
 use kcl_ast::ast::Program;
 use kcl_sema::resolver::scope::ProgramScope;
@@ -48,7 +43,7 @@ pub struct FieldIR {
     /// Field type kind. See [`FieldKind`] for the supported subset.
     pub kind: FieldKind,
     /// `field?: T` declaration — codegen wraps in `Option<T>` and
-    /// maps `Value::undefined` to `None` per D5.
+    /// maps `Value::undefined`/`Value::none` to `None` per D5.
     pub optional: bool,
     /// `field: T = expr` declaration — KCL's VM populates the default
     /// during evaluation, so codegen does not emit a `Default` impl
@@ -56,9 +51,7 @@ pub struct FieldIR {
     pub has_default: bool,
 }
 
-/// The Rust-type-shape a [`FieldIR`] codegens to. Phase 4 step 2
-/// ships primitive kinds; subsequent steps extend with list, dict,
-/// nested-schema, and union kinds.
+/// The Rust-type-shape a [`FieldIR`] codegens to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldKind {
     /// `int` (i64)
@@ -69,10 +62,68 @@ pub enum FieldKind {
     Bool,
     /// `str` (String)
     Str,
+    /// `[T]` — list of the inner kind. KCL list elements are
+    /// homogeneous-typed via sema; the inner kind is whatever
+    /// `TypeKind::List`'s element type resolved to.
+    List(Box<FieldKind>),
+    /// `{K:V}` — dict with the given key and value kinds.
+    Dict(Box<FieldKind>, Box<FieldKind>),
+    /// Reference to another schema by name. Codegen emits the field
+    /// as the other schema's generated Rust type and delegates to
+    /// that type's `TryFrom<&ValueRef>` in the impl.
+    Schema(String),
     /// A kind the Phase 4 MVP doesn't yet handle. Carries a
     /// descriptive label so codegen errors point at the actual
     /// unsupported shape rather than `Unknown`.
     Unsupported(String),
+}
+
+impl FieldKind {
+    /// Rust type expression for this kind. Used in generated struct
+    /// fields and helper invocations.
+    pub fn to_rust_type(&self) -> String {
+        match self {
+            FieldKind::Int => "i64".to_string(),
+            FieldKind::Float => "f64".to_string(),
+            FieldKind::Bool => "bool".to_string(),
+            FieldKind::Str => "String".to_string(),
+            FieldKind::List(inner) => format!("Vec<{}>", inner.to_rust_type()),
+            FieldKind::Dict(k, v) => format!(
+                "std::collections::HashMap<{}, {}>",
+                k.to_rust_type(),
+                v.to_rust_type()
+            ),
+            FieldKind::Schema(name) => name.clone(),
+            FieldKind::Unsupported(label) => format!("/* UNSUPPORTED: {label} */ ()"),
+        }
+    }
+
+    /// Whether this kind is the Unsupported sentinel — emission
+    /// checks this to bail with a CodegenError rather than producing
+    /// an unbuildable `/* UNSUPPORTED */ ()` field type.
+    pub fn is_unsupported(&self) -> bool {
+        matches!(self, FieldKind::Unsupported(_))
+    }
+
+    /// Recursively check whether any nested kind is Unsupported.
+    /// `Vec<Unsupported>` should fail emission just like
+    /// `Unsupported` itself.
+    pub fn has_unsupported(&self) -> bool {
+        match self {
+            FieldKind::Unsupported(_) => true,
+            FieldKind::List(inner) => inner.has_unsupported(),
+            FieldKind::Dict(k, v) => k.has_unsupported() || v.has_unsupported(),
+            _ => false,
+        }
+    }
+
+    /// Best-effort description of this kind for error messages.
+    pub fn describe(&self) -> String {
+        match self {
+            FieldKind::Unsupported(label) => label.clone(),
+            other => other.to_rust_type(),
+        }
+    }
 }
 
 /// Walk the resolved program's main package, extract every schema
@@ -82,10 +133,6 @@ pub(crate) fn extract_schemas(
     scope: &ProgramScope,
 ) -> Result<Vec<SchemaIR>, CodegenError> {
     let mut out = Vec::new();
-    // The main package's resolved scope holds the schemas declared
-    // in the input. Walk its variables looking for SchemaType values
-    // (sema represents `schema Foo: ...` declarations as a variable
-    // of TypeKind::Schema in the package's scope).
     let main_pkg_scopes = match program.pkgs.get(kcl_ast::MAIN_PKG) {
         Some(_) => match scope.scope_map.get(kcl_ast::MAIN_PKG) {
             Some(s) => s,
@@ -96,10 +143,7 @@ pub(crate) fn extract_schemas(
                 )));
             }
         },
-        None => {
-            // No main package — empty input, nothing to do.
-            return Ok(out);
-        }
+        None => return Ok(out),
     };
 
     let scope_borrow = main_pkg_scopes.borrow();
@@ -109,10 +153,8 @@ pub(crate) fn extract_schemas(
             TypeKind::Schema(schema_ty) => schema_ty.clone(),
             _ => continue,
         };
-        // Phase 4 step 2: skip mixins and protocols. Inheritance and
-        // mixin-as-trait codegen are deferred (D9/D10 per the plan).
-        // Mixins are transparent for the consuming schema, so the
-        // schema using them codegens normally; we just don't emit a
+        // Mixins are transparent per Phase 4A D10 memo: the consuming
+        // schema gets all the mixed-in fields inline; emit no
         // standalone type for the mixin itself.
         if ty.is_mixin || ty.is_protocol {
             continue;
@@ -126,13 +168,25 @@ fn schema_to_ir(name: String, ty: &SchemaType) -> Result<SchemaIR, CodegenError>
     if ty.base.is_some() {
         return Err(CodegenError::UnsupportedFeature {
             feature: "schema_inheritance",
-            location: format!("schema {} ({}:{})", name, ty.filename, schema_line(ty)),
+            location: format!("schema {} ({})", name, ty.filename),
         });
     }
 
     let mut fields = Vec::with_capacity(ty.attrs.len());
     for (field_name, attr) in ty.attrs.iter() {
         let kind = field_kind_for(&attr.ty.kind);
+        if kind.has_unsupported() {
+            return Err(CodegenError::UnsupportedFeature {
+                feature: "field_kind",
+                location: format!(
+                    "schema {}.{} ({}): kind {}",
+                    name,
+                    field_name,
+                    ty.filename,
+                    kind.describe()
+                ),
+            });
+        }
         fields.push(FieldIR {
             name: field_name.clone(),
             kind,
@@ -144,19 +198,10 @@ fn schema_to_ir(name: String, ty: &SchemaType) -> Result<SchemaIR, CodegenError>
     Ok(SchemaIR {
         name,
         source_file: ty.filename.clone(),
-        source_line: schema_line(ty),
+        source_line: 0,
         fields,
         doc: ty.doc.clone(),
     })
-}
-
-fn schema_line(ty: &SchemaType) -> u64 {
-    // SchemaType doesn't carry its own range directly in this view;
-    // fields do. For step 2 we surface line 0 as a placeholder; step
-    // 3 will plumb the declaration site through (sema records it on
-    // the schema's defining AST node).
-    let _ = ty;
-    0
 }
 
 fn field_kind_for(ty_kind: &TypeKind) -> FieldKind {
@@ -165,6 +210,25 @@ fn field_kind_for(ty_kind: &TypeKind) -> FieldKind {
         TypeKind::Float | TypeKind::FloatLit(_) => FieldKind::Float,
         TypeKind::Bool | TypeKind::BoolLit(_) => FieldKind::Bool,
         TypeKind::Str | TypeKind::StrLit(_) => FieldKind::Str,
-        other => FieldKind::Unsupported(format!("{other:?}")),
+        TypeKind::List(item_ty) => FieldKind::List(Box::new(field_kind_for(&item_ty.kind))),
+        TypeKind::Dict(dict_ty) => FieldKind::Dict(
+            Box::new(field_kind_for(&dict_ty.key_ty.kind)),
+            Box::new(field_kind_for(&dict_ty.val_ty.kind)),
+        ),
+        TypeKind::Schema(schema_ty) => FieldKind::Schema(schema_ty.name.clone()),
+        TypeKind::Function(_) => FieldKind::Unsupported(
+            "function-typed field (D4 corollary: codegen-time error)".to_string(),
+        ),
+        TypeKind::Union(_) => FieldKind::Unsupported(
+            "union type (Phase 4 step 5 will handle this)".to_string(),
+        ),
+        TypeKind::NumberMultiplier(_) => {
+            FieldKind::Unsupported("unit-typed value (deferred from Phase 4 MVP)".to_string())
+        }
+        TypeKind::Any => FieldKind::Unsupported("any-typed field".to_string()),
+        TypeKind::None => FieldKind::Unsupported("None-typed field".to_string()),
+        TypeKind::Void => FieldKind::Unsupported("Void-typed field".to_string()),
+        TypeKind::Module(_) => FieldKind::Unsupported("module-typed field".to_string()),
+        TypeKind::Named(name) => FieldKind::Unsupported(format!("Named type alias `{name}`")),
     }
 }
