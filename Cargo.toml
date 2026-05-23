@@ -34,6 +34,7 @@ kcl-query = { path = "crates/query" }
 kcl-runner = { path = "crates/runner" }
 kcl-runtime = { path = "crates/runtime" }
 kcl-rust-codegen = { path = "crates/rust-codegen" }
+kcl-rust-codegen-fixture = { path = "crates/rust-codegen-fixture" }
 kcl-sema = { path = "crates/sema" }
 kcl-span = { path = "crates/span" }
 kcl-tools = { path = "crates/tools" }

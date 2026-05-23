@@ -1,0 +1,21 @@
+[package]
+name = "kcl-rust-codegen-fixture"
+version.workspace = true
+edition.workspace = true
+description = "Build-time codegen fixture for kcl-rust-codegen — exists only to host end-to-end tests"
+publish = false
+
+# Don't lint generated code with the strict scm-infra lints; the
+# generated code carries its own #![allow(...)] suppressions and the
+# hand-written shell is trivial.
+[lints.rust]
+unsafe_code = "deny"
+
+[dependencies]
+kcl-runtime.workspace = true
+
+[build-dependencies]
+kcl-rust-codegen.workspace = true
+
+[dev-dependencies]
+kcl-embed.workspace = true
