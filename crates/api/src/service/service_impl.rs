@@ -21,7 +21,7 @@ use kcl_query::override_file;
 use kcl_query::query::CompilationOptions;
 use kcl_query::query::{get_full_schema_type, get_full_schema_type_under_path};
 use kcl_query::selector::{ListOptions, list_variables};
-use kcl_runner::exec_program;
+use kcl_runner::{ExecProgramValueResult, exec_program, exec_program_to_value};
 use kcl_sema::core::global_state::GlobalState;
 use kcl_sema::resolver::Options;
 use kcl_sema::resolver::scope::KCLScopeCache;
@@ -486,6 +486,28 @@ impl KclServiceImpl {
             log_message: result.log_message,
             err_message: result.err_message,
         })
+    }
+
+    /// Execute a KCL program and return the structured [`ExecProgramValueResult`].
+    ///
+    /// Structured-output sibling of [`KclServiceImpl::exec_program`]. Returns a
+    /// [`kcl_runner::ExecProgramValueResult`] holding a [`kcl_runtime::ValueRef`]
+    /// directly, bypassing the JSON/YAML serialisation that the string path
+    /// performs. **Rust-only**: the result type holds an `Rc<RefCell<Value>>`
+    /// and cannot cross the protobuf RPC boundary. Per the plan's D2, the
+    /// protobuf wire format stays string-only and Go consumers continue to
+    /// reach for [`KclServiceImpl::exec_program`].
+    ///
+    /// Takes the same protobuf [`ExecProgramArgs`] shape as `exec_program` for
+    /// API parity; the args are converted to `kcl_runner::ExecProgramArgs` via
+    /// the same path the string variant uses.
+    pub fn exec_program_to_value(
+        &self,
+        args: &ExecProgramArgs,
+    ) -> anyhow::Result<ExecProgramValueResult> {
+        let exec_args = transform_exec_para(&Some(args.clone()), self.plugin_agent)?;
+        let sess = ParseSessionRef::default();
+        exec_program_to_value(sess, &exec_args)
     }
 
     /// Override KCL file with args

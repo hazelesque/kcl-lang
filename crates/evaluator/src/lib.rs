@@ -167,6 +167,25 @@ impl<'ctx> Evaluator<'ctx> {
         Ok(self.plan_globals_to_string())
     }
 
+    /// Evaluate the program and return the structured result as a [`ValueRef`].
+    ///
+    /// The structured-output sibling of [`Evaluator::run`]: same evaluation
+    /// pipeline (init scope, compile ast modules), but returns the
+    /// dict-merged global scope directly instead of running it through
+    /// [`Evaluator::plan_value`] / JSON+YAML serialisation. Consumers walk
+    /// the returned tree themselves — typically via codegen-emitted
+    /// `TryFrom<&ValueRef>` impls (see the rust-codegen crate, Phase 4).
+    ///
+    /// See `docs/dev_guide/valueref-shape.md` for the contract on what is
+    /// safe to do with the returned value — in particular, ValueRefs are
+    /// !Send + !Sync and must not be mutated after evaluation returns.
+    pub fn run_to_value(self: &Evaluator<'ctx>) -> Result<ValueRef> {
+        let modules = self.program.get_modules_for_pkg(kcl_ast::MAIN_PKG);
+        self.init_scope(kcl_ast::MAIN_PKG);
+        self.compile_ast_modules(&modules);
+        Ok(self.plan_globals_to_value())
+    }
+
     /// Evaluate the program with the function mode and return the JSON and YAML result,
     /// which means treating the files in the entire main package as a function run to
     /// return the result of the function run, rather than a dictionary composed of each
@@ -181,8 +200,22 @@ impl<'ctx> Evaluator<'ctx> {
         }
     }
 
-    /// Plan globals to a planed json and yaml string.
-    pub(crate) fn plan_globals_to_string(&self) -> (String, String) {
+    /// Plan globals to a structured [`ValueRef`].
+    ///
+    /// Walks the current package's global scope, merges scalars and named
+    /// globals into a single dict (filtering names that start with
+    /// [`KCL_PRIVATE_VAR_PREFIX`] unless `plan_opts.show_hidden` is on),
+    /// and returns the merged value. The structured-output path
+    /// ([`Evaluator::run_to_value`]) returns this directly; the
+    /// string-output path ([`Evaluator::run`] / [`plan_globals_to_string`])
+    /// hands it to [`Evaluator::plan_value`] for JSON+YAML serialisation.
+    ///
+    /// NOTE: `plan_value`'s `custom_manifests_output` side-channel
+    /// (consumed by the `yaml_stream` builtin) is *not* exercised here —
+    /// structured consumers receive the dict-merged value tree, not a
+    /// yaml-stream re-parse. That side-channel is being cleaned up in
+    /// Phase 2.5 of the structured-output refactor.
+    pub(crate) fn plan_globals_to_value(&self) -> ValueRef {
         let current_pkgpath = self.current_pkgpath();
         let pkg_scopes = &self.pkg_scopes.borrow();
         let scopes = pkg_scopes
@@ -194,9 +227,9 @@ impl<'ctx> Evaluator<'ctx> {
         let globals = &scope.variables;
         // Construct a plan object.
         let mut global_dict = self.dict_value();
-        // Plan empty dict result.
+        // Empty result.
         if scalars.is_empty() && globals.is_empty() {
-            return self.plan_value(&global_dict);
+            return global_dict;
         }
         // Deal scalars
         for scalar in scalars.iter() {
@@ -213,11 +246,16 @@ impl<'ctx> Evaluator<'ctx> {
             self.dict_insert_merge_value(&mut value_dict, name.as_str(), value);
             self.dict_insert_merge_value(&mut global_dict, SCALAR_KEY, &value_dict);
         }
-        // Plan result to JSON and YAML string.
         match global_dict.dict_get_value(SCALAR_KEY) {
-            Some(value) => self.plan_value(&value),
-            None => self.plan_value(&self.dict_value()),
+            Some(value) => value,
+            None => self.dict_value(),
         }
+    }
+
+    /// Plan globals to a planed json and yaml string.
+    pub(crate) fn plan_globals_to_string(&self) -> (String, String) {
+        let value = self.plan_globals_to_value();
+        self.plan_value(&value)
     }
 
     /// Get evaluator default ok result

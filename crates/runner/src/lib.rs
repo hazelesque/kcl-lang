@@ -13,7 +13,7 @@ use kcl_query::apply_overrides;
 use kcl_sema::resolver::{
     Options, resolve_program, resolve_program_with_opts, scope::ProgramScope,
 };
-pub use runner::{ExecProgramArgs, ExecProgramResult, MapErrorResult};
+pub use runner::{ExecProgramArgs, ExecProgramResult, ExecProgramValueResult, MapErrorResult};
 use runner::{FastRunner, RunnerOptions};
 
 pub mod runner;
@@ -117,6 +117,76 @@ pub fn execute(
         plugin_agent_ptr: args.plugin_agent,
     }))
     .run(&program, args)
+}
+
+/// Load, resolve, and evaluate a KCL program from `args.k_filename_list`,
+/// returning the structured [`ExecProgramValueResult`].
+///
+/// Structured-output sibling of [`exec_program`]. Parses the files via
+/// `kcl_parser::load_program`, applies any overrides, then delegates to
+/// [`execute_to_value`] for resolution + evaluation. The returned result
+/// holds a [`kcl_runtime::ValueRef`] instead of JSON+YAML strings;
+/// consumers walk the tree directly (typically via codegen-emitted
+/// `TryFrom<&ValueRef>` impls — see the rust-codegen crate, Phase 4).
+///
+/// **Note that it is not thread safe.**
+pub fn exec_program_to_value(
+    sess: ParseSessionRef,
+    args: &ExecProgramArgs,
+) -> Result<ExecProgramValueResult> {
+    let opts = args.get_load_program_options();
+    let kcl_paths_str = args
+        .k_filename_list
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<&str>>();
+    let module_cache = KCLModuleCache::default();
+    let mut program = load_program(
+        sess.clone(),
+        kcl_paths_str.as_slice(),
+        Some(opts),
+        Some(module_cache),
+    )?
+    .program;
+    apply_overrides(
+        &mut program,
+        &args.overrides,
+        &[],
+        args.print_override_ast || args.debug > 0,
+    )?;
+    execute_to_value(sess, program, args)
+}
+
+/// Resolve and evaluate an already-parsed KCL [`Program`], returning the
+/// structured [`ExecProgramValueResult`].
+///
+/// Structured-output sibling of [`execute`]. Behaves identically up to the
+/// final evaluation step, where [`FastRunner::run_to_value`] returns a
+/// [`kcl_runtime::ValueRef`] instead of JSON+YAML strings. The
+/// `compile_only` short-circuit returns an empty result with
+/// `value = ValueRef::undefined()`.
+///
+/// **Note that it is not thread safe.**
+pub fn execute_to_value(
+    sess: ParseSessionRef,
+    mut program: Program,
+    args: &ExecProgramArgs,
+) -> Result<ExecProgramValueResult> {
+    if args.compile_only {
+        let resolve_opts = Options {
+            merge_program: false,
+            ..Default::default()
+        };
+        let scope = resolve_program_with_opts(&mut program, resolve_opts, None);
+        emit_compile_diag_to_string(sess, &scope, args.compile_only)?;
+        return Ok(ExecProgramValueResult::default());
+    }
+    let scope = resolve_program(&mut program);
+    emit_compile_diag_to_string(sess, &scope, false)?;
+    FastRunner::new(Some(RunnerOptions {
+        plugin_agent_ptr: args.plugin_agent,
+    }))
+    .run_to_value(&program, args)
 }
 
 /// `execute_module` can directly execute the ast `Module`.

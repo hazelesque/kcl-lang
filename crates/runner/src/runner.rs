@@ -11,7 +11,7 @@ use kcl_config::{
 use kcl_error::{Diagnostic, Handler};
 #[cfg(not(target_arch = "wasm32"))]
 use kcl_runtime::kcl_plugin_init;
-use kcl_runtime::{Context, PanicInfo, RuntimePanicRecord};
+use kcl_runtime::{Context, PanicInfo, RuntimePanicRecord, ValueRef};
 #[cfg(target_arch = "wasm32")]
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -98,6 +98,29 @@ impl ExecProgramArgs {
 pub struct ExecProgramResult {
     pub json_result: String,
     pub yaml_result: String,
+    pub log_message: String,
+    pub err_message: String,
+}
+
+/// ExecProgramValueResult denotes the running result of a KCL program when
+/// structured output is wanted instead of JSON+YAML strings.
+///
+/// The sibling of [`ExecProgramResult`] for in-process Rust consumers. It is
+/// **not** serialisable — the [`ValueRef`] holds `Rc<RefCell<Value>>` which
+/// cannot cross the protobuf RPC boundary that Go and other host languages
+/// use. Per the plan's D2, the protobuf wire format stays string-only; Rust
+/// consumers reach for this struct via [`FastRunner::run_to_value`] /
+/// [`crate::execute_to_value`] / `KclvmServiceImpl::exec_program_to_value`.
+///
+/// `value` is the dict-merged global scope (see
+/// `kcl_evaluator::Evaluator::plan_globals_to_value`). On evaluation
+/// failure it is `ValueRef::undefined()` and `err_message` describes the
+/// failure — Phase 6a will replace this string-shaped error path with a
+/// structured `EvaluationError` type; for now, mirroring `ExecProgramResult`
+/// keeps the runner layer behaviour-preserving.
+#[derive(Debug, Default, Clone)]
+pub struct ExecProgramValueResult {
+    pub value: ValueRef,
     pub log_message: String,
     pub err_message: String,
 }
@@ -357,6 +380,113 @@ impl FastRunner {
         }
         // Free all value references at runtime. This is because the runtime context marks
         // all KCL objects and holds their copies, so it is necessary to actively GC them.
+        ctx.borrow().gc();
+        Ok(result)
+    }
+
+    /// Run a KCL program and return the structured [`ValueRef`] result.
+    ///
+    /// Sibling of [`FastRunner::run`] that returns the dict-merged global
+    /// scope as a `ValueRef` instead of JSON+YAML strings. Otherwise behaves
+    /// identically: same context construction, same panic-hook capture, same
+    /// PanicInfo→string round-trip for runtime errors. The shared
+    /// panic-hook plumbing is duplicated here deliberately — Phase 6a will
+    /// replace `catch_unwind` + JSON round-trip with a structured
+    /// `EvaluationError` type and the duplication can be removed then.
+    pub fn run_to_value(
+        &self,
+        program: &ast::Program,
+        args: &ExecProgramArgs,
+    ) -> Result<ExecProgramValueResult> {
+        let ctx = Rc::new(RefCell::new(args_to_ctx(program, args)));
+        let evaluator = Evaluator::new_with_runtime_ctx(program, ctx.clone());
+        #[cfg(target_arch = "wasm32")]
+        Lazy::force(&ONCE_PANIC_HOOK);
+        #[cfg(not(target_arch = "wasm32"))]
+        let prev_hook = std::panic::take_hook();
+        #[cfg(not(target_arch = "wasm32"))]
+        std::panic::set_hook(Box::new(|info: &std::panic::PanicHookInfo| {
+            KCL_RUNTIME_PANIC_RECORD.with(|record| {
+                let mut record = record.borrow_mut();
+                record.kcl_panic_info = true;
+                record.message = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = info.payload().downcast_ref::<&String>() {
+                    (*s).clone()
+                } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                    (*s).clone()
+                } else {
+                    "unknown runtime error".to_string()
+                };
+                if let Some(location) = info.location() {
+                    record.rust_file = location.file().to_string();
+                    record.rust_line = location.line() as i32;
+                    record.rust_col = location.column() as i32;
+                }
+            })
+        }));
+        let evaluator_result = std::panic::catch_unwind(|| {
+            if self.opts.plugin_agent_ptr > 0 {
+                #[cfg(not(target_arch = "wasm32"))]
+                unsafe {
+                    let plugin_method: extern "C-unwind" fn(
+                        method: *const c_char,
+                        args: *const c_char,
+                        kwargs: *const c_char,
+                    ) -> *const c_char = std::mem::transmute(self.opts.plugin_agent_ptr);
+                    kcl_plugin_init(plugin_method);
+                }
+            }
+            evaluator.run_to_value()
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        std::panic::set_hook(prev_hook);
+        KCL_RUNTIME_PANIC_RECORD.with(|record| {
+            let record = record.borrow();
+            ctx.borrow_mut().set_panic_info(&record);
+        });
+        let mut result = ExecProgramValueResult {
+            log_message: ctx.borrow().log_message.clone(),
+            ..Default::default()
+        };
+        let is_err = evaluator_result.is_err();
+        match evaluator_result {
+            Ok(r) => match r {
+                Ok(value) => {
+                    result.value = value;
+                }
+                Err(err) => {
+                    result.err_message = err.to_string();
+                }
+            },
+            Err(err) => {
+                result.err_message = if is_err {
+                    ctx.borrow()
+                        .get_panic_info_json_string()
+                        .unwrap_or_default()
+                } else {
+                    kcl_error::err_to_str(err)
+                };
+            }
+        }
+        // Wrap runtime JSON Panic error string into diagnostic style string —
+        // mirrors the same Handler-based wrapping in FastRunner::run. Phase 6a
+        // will replace this PanicInfo JSON round-trip with structured
+        // diagnostic propagation; the duplicate is intentional until then.
+        if !result.err_message.is_empty() && std::env::var(KCL_DEBUG_ERROR_ENV_VAR).is_err() {
+            result.err_message = match Handler::default()
+                .add_diagnostic(<PanicInfo as Into<Diagnostic>>::into(PanicInfo::from(
+                    result.err_message.as_str(),
+                )))
+                .emit_to_string()
+            {
+                Ok(msg) => msg,
+                Err(err) => err.to_string(),
+            };
+        }
+        // GC the runtime context's tracked raw pointers; the returned
+        // ValueRef stays alive because the Rc inside it independently keeps
+        // the underlying allocation reachable.
         ctx.borrow().gc();
         Ok(result)
     }

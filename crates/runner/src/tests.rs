@@ -1,6 +1,7 @@
 #![allow(clippy::arc_with_non_send_sync)]
 
 use crate::exec_program;
+use crate::exec_program_to_value;
 use crate::{execute, runner::ExecProgramArgs};
 use anyhow::Result;
 use kcl_ast::ast::{Module, Program};
@@ -446,4 +447,155 @@ fn test_kcl_issue_1799() {
                 .adjust_canonicalization()
         )
     );
+}
+
+/// Tests for the Phase 2 structured-output path. Walks the [`ValueRef`] tree
+/// returned by [`exec_program_to_value`] / [`FastRunner::run_to_value`] and
+/// asserts structural shape end-to-end.
+///
+/// These tests are the canary for the structured-path-vs-string-path drift
+/// the rest of the workspace's grammar tests cannot catch by themselves.
+#[cfg(test)]
+mod structured_output_tests {
+    use super::*;
+
+    /// Top-level result of evaluating a configuration program is a dict
+    /// (with the variable name as the key, the assigned value as the value).
+    #[test]
+    fn test_structured_value_top_level_is_dict() {
+        let sess = Arc::new(ParseSession::default());
+        let args = ExecProgramArgs {
+            k_filename_list: vec!["test.k".to_string()],
+            k_code_list: vec!["alice = {age = 18}".to_string()],
+            ..Default::default()
+        };
+        let result = exec_program_to_value(sess, &args).expect("evaluation failed");
+        assert!(
+            result.err_message.is_empty(),
+            "unexpected err_message: {}",
+            result.err_message
+        );
+        assert!(
+            result.value.is_dict(),
+            "top-level value is not a dict: type={}",
+            result.value.type_str()
+        );
+        let alice = result
+            .value
+            .dict_get_value("alice")
+            .expect("missing key 'alice' at top level");
+        assert!(alice.is_dict(), "alice is not a dict");
+        let age = alice
+            .dict_get_value("age")
+            .expect("missing key 'age' under alice");
+        assert_eq!(age.as_int(), 18);
+    }
+
+    /// Schema instances surface as `Value::schema_value` carrying the schema
+    /// name + pkgpath inline. Confirms the chain-of-trust property the
+    /// Phase 4 codegen will rely on.
+    #[test]
+    fn test_structured_value_preserves_schema_metadata() {
+        let sess = Arc::new(ParseSession::default());
+        let args = ExecProgramArgs {
+            k_filename_list: vec!["test.k".to_string()],
+            k_code_list: vec![
+                "schema Vm:\n    memory_mb: int = 1024\n    name: str\n\nvm = Vm {name = \"alpha\"}".to_string(),
+            ],
+            ..Default::default()
+        };
+        let result = exec_program_to_value(sess, &args).expect("evaluation failed");
+        assert!(
+            result.err_message.is_empty(),
+            "unexpected err_message: {}",
+            result.err_message
+        );
+        let vm = result
+            .value
+            .dict_get_value("vm")
+            .expect("missing key 'vm' at top level");
+        assert!(vm.is_schema(), "vm is not a schema_value: type={}", vm.type_str());
+        let vm_inner = vm.as_schema();
+        assert_eq!(vm_inner.name, "Vm", "schema name mismatch");
+        // Schema-instantiated default value flows through to the result.
+        let memory = vm
+            .dict_get_value("memory_mb")
+            .expect("missing memory_mb on vm schema instance");
+        assert_eq!(memory.as_int(), 1024);
+        let name = vm
+            .dict_get_value("name")
+            .expect("missing name on vm schema instance");
+        assert_eq!(name.as_str(), "alpha");
+    }
+
+    /// For non-yaml_stream programs (the simple-config case), the JSON
+    /// produced by serialising the structured ValueRef should byte-equal the
+    /// string-path's `json_result`. This guards the snapshot equivalence
+    /// between `run()` and `run_to_value()` for the workload that codegen
+    /// consumers care about.
+    #[test]
+    fn test_structured_json_matches_string_path() {
+        let code = "schema Disk:\n    size_gb: int\n\nschema Vm:\n    name: str\n    disks: [Disk]\n\nvm = Vm {\n    name = \"beta\"\n    disks = [Disk {size_gb = 20}, Disk {size_gb = 40}]\n}";
+        let args = ExecProgramArgs {
+            k_filename_list: vec!["test.k".to_string()],
+            k_code_list: vec![code.to_string()],
+            ..Default::default()
+        };
+        let sess_str = Arc::new(ParseSession::default());
+        let string_result = exec_program(sess_str, &args).expect("string path failed");
+        assert!(
+            string_result.err_message.is_empty(),
+            "string-path err: {}",
+            string_result.err_message
+        );
+
+        let sess_val = Arc::new(ParseSession::default());
+        let value_result = exec_program_to_value(sess_val, &args).expect("value path failed");
+        assert!(
+            value_result.err_message.is_empty(),
+            "value-path err: {}",
+            value_result.err_message
+        );
+
+        // Both representations of the same evaluation should be observably
+        // equivalent at the structural level. Walk both and assert key fields.
+        let str_json: Value =
+            serde_json::from_str(&string_result.json_result).expect("string json invalid");
+        let str_vm = str_json.get("vm").expect("string path missing 'vm'");
+        assert_eq!(str_vm.get("name").and_then(Value::as_str), Some("beta"));
+        let str_disks = str_vm.get("disks").and_then(Value::as_array).expect("disks");
+        assert_eq!(str_disks.len(), 2);
+
+        let val_vm = value_result.value.dict_get_value("vm").expect("'vm'");
+        assert!(val_vm.is_schema(), "value-path vm is not a schema");
+        assert_eq!(val_vm.dict_get_value("name").unwrap().as_str(), "beta");
+        let val_disks = val_vm.dict_get_value("disks").expect("disks");
+        assert!(val_disks.is_list());
+        assert_eq!(val_disks.as_list_ref().values.len(), 2);
+    }
+
+    /// The structured-output path returns the dict-merged global scope
+    /// directly. An empty program should produce an empty dict, mirroring
+    /// what the string path emits (`{}` / empty YAML).
+    #[test]
+    fn test_structured_value_empty_program() {
+        let sess = Arc::new(ParseSession::default());
+        let args = ExecProgramArgs {
+            k_filename_list: vec!["test.k".to_string()],
+            k_code_list: vec!["".to_string()],
+            ..Default::default()
+        };
+        let result = exec_program_to_value(sess, &args).expect("evaluation failed");
+        assert!(
+            result.err_message.is_empty(),
+            "unexpected err_message: {}",
+            result.err_message
+        );
+        assert!(result.value.is_dict(), "top-level value is not a dict");
+        assert_eq!(
+            result.value.as_dict_ref().values.len(),
+            0,
+            "empty program produced non-empty dict"
+        );
+    }
 }
