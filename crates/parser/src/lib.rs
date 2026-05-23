@@ -252,12 +252,40 @@ pub fn parse_expr(src: &str) -> Option<ast::NodeRef<ast::Expr>> {
     }
 }
 
+/// A package whose source is provided in-memory by an embedding host
+/// rather than read from disk.
+///
+/// Populated by [`crates/embed/`](../../embed/index.html)'s
+/// `Embedded::register_module` API. Resolves strictly before the disk-based
+/// internal and external package lookups in [`find_packages`]; in-memory
+/// shadows disk for matching package paths (intentional — per the embed
+/// API's documented contract).
+///
+/// See `docs/dev_guide/loader-injection.md` for the design decision and
+/// the resolution flow this hooks into.
+#[derive(Debug, Clone, Default)]
+pub struct VirtualPackage {
+    /// Synthetic root used as the package's `pkg_root` during resolution.
+    /// Conventionally `/__kcl_embed__/<pkg_name>`; does not need to exist
+    /// on disk and is treated as an opaque identifier throughout.
+    pub root: PathBuf,
+    /// `(synthetic_file_path, source_text)` pairs. The synthetic paths
+    /// must also be present in `KCLModuleCache::source_code` so the
+    /// parser's `parse_file` content lookup hits the in-memory source
+    /// instead of falling back to a disk read (which would fail).
+    pub files: Vec<(PathBuf, String)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct LoadProgramOptions {
     pub work_dir: String,
     pub k_code_list: Vec<String>,
     pub vendor_dirs: Vec<String>,
     pub package_maps: HashMap<String, String>,
+    /// Packages whose source is provided in-memory by an embedding host.
+    /// See [`VirtualPackage`] and `docs/dev_guide/loader-injection.md`.
+    /// Resolved before disk-based internal/external lookups.
+    pub virtual_packages: HashMap<String, VirtualPackage>,
     /// The parser mode.
     pub mode: ParseMode,
     /// Whether to load packages.
@@ -278,6 +306,7 @@ impl Default for LoadProgramOptions {
             k_code_list: Default::default(),
             vendor_dirs: vec![get_vendor_home()],
             package_maps: Default::default(),
+            virtual_packages: Default::default(),
             mode: ParseMode::ParseComments,
             load_packages: true,
             load_plugins: false,
@@ -475,6 +504,15 @@ fn find_packages(
         return Ok(None);
     }
 
+    // 0. Virtual (host-registered, in-memory) packages take precedence
+    //    over disk per the embed-API contract documented in
+    //    `docs/dev_guide/loader-injection.md`. If a virtual package
+    //    resolves the path, the disk lookups are skipped entirely —
+    //    intentional shadowing.
+    if let Some(virtual_pkg_info) = is_virtual_pkg(pkg_path, opts) {
+        return Ok(Some(virtual_pkg_info));
+    }
+
     // 1. Look for in the current package's directory.
     let is_internal = is_internal_pkg(pkg_name, pkg_root, pkg_path)?;
     // 2. Look for in the vendor path.
@@ -645,6 +683,39 @@ fn get_dir_files(dir: &str) -> Result<Vec<String>> {
 
     list.sort();
     Ok(list)
+}
+
+/// Resolve [`pkg_path`] against the host-registered in-memory virtual
+/// packages on [`LoadProgramOptions::virtual_packages`].
+///
+/// Returns `Some(PkgInfo)` if `pkg_path`'s first segment names a
+/// registered virtual package; the returned PkgInfo enumerates the
+/// virtual package's synthetic file paths verbatim. The caller is
+/// expected to have populated `KCLModuleCache::source_code` with
+/// entries for those synthetic paths — without that, the subsequent
+/// `parse_file` content lookup will fall back to a disk read and
+/// fail.
+///
+/// Pure lookup; no filesystem I/O, no error path. Returns `None` if
+/// `pkg_path` doesn't parse to a recognisable external-package name
+/// or no virtual package is registered under that name.
+fn is_virtual_pkg(pkg_path: &str, opts: &LoadProgramOptions) -> Option<PkgInfo> {
+    if opts.virtual_packages.is_empty() {
+        return None;
+    }
+    let pkg_name = parse_external_pkg_name(pkg_path).ok()?;
+    let virt = opts.virtual_packages.get(&pkg_name)?;
+    let k_files = virt
+        .files
+        .iter()
+        .map(|(p, _)| p.to_string_lossy().to_string())
+        .collect();
+    Some(PkgInfo::new(
+        pkg_name,
+        virt.root.to_string_lossy().to_string(),
+        pkg_path.to_string(),
+        k_files,
+    ))
 }
 
 /// Look for [`pkgpath`] in the external package's home.

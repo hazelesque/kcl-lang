@@ -872,3 +872,238 @@ fn parse_all_file_under_path() {
 
     assert_eq!(res.paths.len(), 1);
 }
+
+/// Tests for in-memory virtual packages, the loader-side hook the embed
+/// API (`crates/embed/`) builds on. See `docs/dev_guide/loader-injection.md`
+/// for the design.
+///
+/// Each test exercises a different facet of `LoadProgramOptions::virtual_packages`
+/// + `ModuleCache::source_code` co-population: top-level import of a
+/// registered module, transitive import across registered modules,
+/// registered-but-unimported (lazy), imported-but-not-registered (existing
+/// diagnostic preserved).
+#[cfg(test)]
+mod virtual_packages {
+    use super::*;
+
+    /// Build a `KCLModuleCache` pre-populated with `source_code` entries
+    /// for each virtual file referenced in `vps`. The cache key is the
+    /// `PathBuf` exactly as provided in `VirtualPackage.files`, matching
+    /// what `parse_file`'s lookup will use after `find_packages`
+    /// → `is_virtual_pkg` → `PkgFile::new(p.into(), ...)`.
+    fn module_cache_with_virtual_sources(
+        vps: &HashMap<String, VirtualPackage>,
+    ) -> KCLModuleCache {
+        let cache = KCLModuleCache::default();
+        {
+            let mut cache_w = cache.write().unwrap();
+            for vp in vps.values() {
+                for (path, source) in &vp.files {
+                    cache_w
+                        .source_code
+                        .insert(path.clone(), source.clone());
+                }
+            }
+        }
+        cache
+    }
+
+    fn dummy_main_file() -> String {
+        // `load_program` requires at least one file path. We provide a
+        // synthetic main path; the actual source comes from `k_code_list`
+        // (pairwise consumption per `get_compile_entries_from_paths`).
+        "__virtual_main__.k".to_string()
+    }
+
+    /// Top-level `import` of a registered virtual package resolves
+    /// successfully; the imported package's modules appear in the
+    /// resulting Program's `pkgs` map.
+    #[test]
+    fn test_main_imports_registered_virtual_module() {
+        let sm = SourceMap::new(FilePathMapping::empty());
+        let sess = Arc::new(ParseSession::with_source_map(Arc::new(sm)));
+
+        let mut virtual_packages = HashMap::new();
+        virtual_packages.insert(
+            "tilley".to_string(),
+            VirtualPackage {
+                root: PathBuf::from("/__kcl_embed__/tilley"),
+                files: vec![(
+                    PathBuf::from("/__kcl_embed__/tilley/main.k"),
+                    "schema Vm:\n    name: str\n    memory_mb: int = 1024\n".to_string(),
+                )],
+            },
+        );
+
+        let opts = LoadProgramOptions {
+            k_code_list: vec!["import tilley\nvm = tilley.Vm {name = \"alpha\"}".to_string()],
+            virtual_packages: virtual_packages.clone(),
+            ..Default::default()
+        };
+
+        let cache = module_cache_with_virtual_sources(&virtual_packages);
+        let main = dummy_main_file();
+        let result = load_program(sess.clone(), &[&main], Some(opts), Some(cache))
+            .expect("load_program failed");
+
+        // The registered virtual package is in the program's pkgs map.
+        assert!(
+            result.program.pkgs.contains_key("tilley"),
+            "expected 'tilley' pkg in result; got keys: {:?}",
+            result.program.pkgs.keys().collect::<Vec<_>>()
+        );
+
+        // Sanity: no errors. (Sema isn't run here — load_program is just
+        // parse+resolve-imports — but the import resolution itself must
+        // have produced no "pkgpath not found" diagnostics.)
+        let errors = sess.classification().0;
+        assert!(
+            errors.is_empty(),
+            "expected zero parse-stage errors; got: {errors:?}"
+        );
+    }
+
+    /// Transitive `import`: a registered virtual module's `import`
+    /// statements resolve through the same registry. A imports B
+    /// (both virtual); main imports A; B's modules appear in the
+    /// program too.
+    #[test]
+    fn test_transitive_virtual_imports() {
+        let sm = SourceMap::new(FilePathMapping::empty());
+        let sess = Arc::new(ParseSession::with_source_map(Arc::new(sm)));
+
+        let mut virtual_packages = HashMap::new();
+        virtual_packages.insert(
+            "tilley_vm".to_string(),
+            VirtualPackage {
+                root: PathBuf::from("/__kcl_embed__/tilley_vm"),
+                files: vec![(
+                    PathBuf::from("/__kcl_embed__/tilley_vm/main.k"),
+                    "schema VmSpec:\n    cores: int = 2\n".to_string(),
+                )],
+            },
+        );
+        virtual_packages.insert(
+            "tilley".to_string(),
+            VirtualPackage {
+                root: PathBuf::from("/__kcl_embed__/tilley"),
+                files: vec![(
+                    PathBuf::from("/__kcl_embed__/tilley/main.k"),
+                    "import tilley_vm\n\nschema Vm:\n    name: str\n    spec: tilley_vm.VmSpec\n"
+                        .to_string(),
+                )],
+            },
+        );
+
+        let opts = LoadProgramOptions {
+            k_code_list: vec![
+                "import tilley\nvm = tilley.Vm {name = \"alpha\", spec = tilley_vm.VmSpec {}}"
+                    .to_string(),
+            ],
+            virtual_packages: virtual_packages.clone(),
+            ..Default::default()
+        };
+
+        let cache = module_cache_with_virtual_sources(&virtual_packages);
+        let main = dummy_main_file();
+        let result = load_program(sess.clone(), &[&main], Some(opts), Some(cache))
+            .expect("load_program failed");
+
+        assert!(
+            result.program.pkgs.contains_key("tilley"),
+            "missing 'tilley' pkg"
+        );
+        assert!(
+            result.program.pkgs.contains_key("tilley_vm"),
+            "missing transitively-imported 'tilley_vm' pkg; pkgs: {:?}",
+            result.program.pkgs.keys().collect::<Vec<_>>()
+        );
+
+        let errors = sess.classification().0;
+        assert!(
+            errors.is_empty(),
+            "expected zero parse-stage errors; got: {errors:?}"
+        );
+    }
+
+    /// A virtual package that's registered but never imported by the
+    /// main program does not appear in the result (lazy parsing posture
+    /// per D3). No errors fire for it.
+    #[test]
+    fn test_registered_but_unimported_is_lazy() {
+        let sm = SourceMap::new(FilePathMapping::empty());
+        let sess = Arc::new(ParseSession::with_source_map(Arc::new(sm)));
+
+        let mut virtual_packages = HashMap::new();
+        virtual_packages.insert(
+            "unused_pkg".to_string(),
+            VirtualPackage {
+                root: PathBuf::from("/__kcl_embed__/unused_pkg"),
+                files: vec![(
+                    PathBuf::from("/__kcl_embed__/unused_pkg/main.k"),
+                    // Deliberately not-quite-broken: parses but would
+                    // fail sema if it were ever loaded. Lazy resolution
+                    // means it never is.
+                    "schema Junk:\n    x: int\n".to_string(),
+                )],
+            },
+        );
+
+        let opts = LoadProgramOptions {
+            k_code_list: vec!["a = 1".to_string()],
+            virtual_packages: virtual_packages.clone(),
+            ..Default::default()
+        };
+
+        let cache = module_cache_with_virtual_sources(&virtual_packages);
+        let main = dummy_main_file();
+        let result = load_program(sess.clone(), &[&main], Some(opts), Some(cache))
+            .expect("load_program failed");
+
+        assert!(
+            !result.program.pkgs.contains_key("unused_pkg"),
+            "unused_pkg should not appear in result; got pkgs: {:?}",
+            result.program.pkgs.keys().collect::<Vec<_>>()
+        );
+        let errors = sess.classification().0;
+        assert!(
+            errors.is_empty(),
+            "registered-but-unimported should not surface errors; got: {errors:?}"
+        );
+    }
+
+    /// Importing a package name that has no registered virtual package
+    /// and no on-disk match preserves the existing "pkgpath not found"
+    /// diagnostic — the virtual-packages hook does not silently swallow
+    /// the failure case.
+    #[test]
+    fn test_imported_but_not_registered_preserves_diagnostic() {
+        let sm = SourceMap::new(FilePathMapping::empty());
+        let sess = Arc::new(ParseSession::with_source_map(Arc::new(sm)));
+
+        let opts = LoadProgramOptions {
+            k_code_list: vec!["import never_registered\na = 1".to_string()],
+            // virtual_packages deliberately empty: the import should
+            // fall through to is_internal_pkg / is_external_pkg
+            // failures and produce the "pkgpath not found" diagnostic.
+            ..Default::default()
+        };
+        let main = dummy_main_file();
+        // The load itself returns Ok; the diagnostic is recorded on the
+        // session.
+        let _ = load_program(sess.clone(), &[&main], Some(opts), Some(KCLModuleCache::default()));
+
+        let errors = sess.classification().0;
+        let found_pkgpath_not_found = errors.iter().any(|d| {
+            d.messages.iter().any(|m| {
+                m.message
+                    .contains("pkgpath never_registered not found in the program")
+            })
+        });
+        assert!(
+            found_pkgpath_not_found,
+            "expected 'pkgpath ... not found' diagnostic for unregistered import; \
+             got: {errors:?}"
+        );
+    }
+}
