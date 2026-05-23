@@ -694,4 +694,198 @@ mod structured_output_tests {
             "empty program produced non-empty dict"
         );
     }
+
+    /// Tilley-shaped fixture exercising the realistic surface Phase 4 codegen
+    /// will need to read. Single program, no inheritance, no mixins (both
+    /// deferred from Phase 4 MVP per D9/D10), but does exercise:
+    ///
+    ///   - Discriminator-tagged single-schema variant (Tilley's TestAssertion
+    ///     pattern; mapped to a Rust tagged enum by Phase 4's
+    ///     `# @rust: tagged_enum(discriminator = ...)` annotation under D6)
+    ///   - Conditional check-block predicates per discriminator value
+    ///   - Optional fields (`field?: T`) — both set and unset across variants
+    ///   - Primitive-union typed fields (`"a" | "b" | "c"`)
+    ///   - Nested schemas (HealthCheck inside Vm)
+    ///   - Lists of schemas
+    ///   - Defaults flowing through (Vm with no overrides uses memory_mb,
+    ///     cores, and health_checks defaults)
+    ///
+    /// Empirically pins the **D5 answer**: an `field?: T` declaration where
+    /// the instance does not set the field surfaces in the resulting
+    /// `ValueRef` as `Value::undefined`. (The plan's D5 hypothesis was
+    /// `Value::none`; this fixture proved it wrong before any codegen was
+    /// written. Phase 4 codegen maps `Value::undefined → None` accordingly.
+    /// Explicit `field = None` in source — distinct from omitted — is
+    /// expected to produce `Value::none`; Phase 4A's pre-investigation
+    /// memo confirms the distinction empirically.)
+    #[test]
+    fn test_structured_value_tilley_shaped_fixture() {
+        let sess = Arc::new(ParseSession::default());
+        let args = ExecProgramArgs {
+            k_filename_list: vec!["test.k".to_string()],
+            k_code_list: vec![concat!(
+                "schema HealthCheck:\n",
+                "    type: \"command\" | \"service\" | \"port\"\n",
+                "    command?: str\n",
+                "    expected_exit?: int\n",
+                "    service?: str\n",
+                "    state?: \"running\" | \"stopped\"\n",
+                "    port?: int\n",
+                "    host?: str\n",
+                "\n",
+                "    check:\n",
+                "        command != Undefined if type == \"command\", \"command variant requires command\"\n",
+                "        service != Undefined if type == \"service\", \"service variant requires service\"\n",
+                "        port != Undefined if type == \"port\", \"port variant requires port\"\n",
+                "\n",
+                "schema Vm:\n",
+                "    name: str\n",
+                "    memory_mb: int = 1024\n",
+                "    cores: int = 2\n",
+                "    health_checks: [HealthCheck] = []\n",
+                "\n",
+                "vms = [\n",
+                "    Vm {\n",
+                "        name = \"alpha\"\n",
+                "        memory_mb = 2048\n",
+                "        health_checks = [\n",
+                "            HealthCheck {type = \"command\", command = \"/usr/bin/true\", expected_exit = 0}\n",
+                "            HealthCheck {type = \"service\", service = \"sshd\", state = \"running\"}\n",
+                "            HealthCheck {type = \"port\", port = 22}\n",
+                "        ]\n",
+                "    }\n",
+                "    Vm {\n",
+                "        name = \"beta\"\n",
+                "    }\n",
+                "]\n",
+            )
+            .to_string()],
+            ..Default::default()
+        };
+        let result = exec_program_to_value(sess, &args).expect("evaluation failed");
+        assert!(
+            result.err_message.is_empty(),
+            "unexpected err_message: {}",
+            result.err_message
+        );
+
+        // Top level: dict with a single key `vms`.
+        assert!(result.value.is_dict(), "top-level is not a dict");
+        let vms = result
+            .value
+            .dict_get_value("vms")
+            .expect("missing key 'vms' at top level");
+
+        assert!(vms.is_list(), "vms is not a list: type={}", vms.type_str());
+        let vms_list = vms.as_list_ref();
+        assert_eq!(vms_list.values.len(), 2, "expected 2 VMs");
+
+        // VM[0]: alpha — all defaults overridden, three health checks.
+        let alpha = &vms_list.values[0];
+        assert!(alpha.is_schema(), "vms[0] is not a schema_value");
+        assert_eq!(alpha.as_schema().name, "Vm");
+        assert_eq!(alpha.dict_get_value("name").unwrap().as_str(), "alpha");
+        assert_eq!(alpha.dict_get_value("memory_mb").unwrap().as_int(), 2048);
+        assert_eq!(
+            alpha.dict_get_value("cores").unwrap().as_int(),
+            2,
+            "cores default did not flow through on alpha"
+        );
+
+        let alpha_checks = alpha.dict_get_value("health_checks").expect("health_checks");
+        assert!(alpha_checks.is_list());
+        let alpha_checks_list = alpha_checks.as_list_ref();
+        assert_eq!(alpha_checks_list.values.len(), 3);
+
+        // health_checks[0]: command variant.
+        let hc0 = &alpha_checks_list.values[0];
+        assert!(hc0.is_schema(), "hc0 is not a schema_value");
+        assert_eq!(hc0.as_schema().name, "HealthCheck");
+        assert_eq!(hc0.dict_get_value("type").unwrap().as_str(), "command");
+        assert_eq!(
+            hc0.dict_get_value("command").unwrap().as_str(),
+            "/usr/bin/true"
+        );
+        assert_eq!(hc0.dict_get_value("expected_exit").unwrap().as_int(), 0);
+
+        // D5 empirical answer: unset optional fields surface as
+        // Value::undefined (not Value::none, as the plan's hypothesis
+        // assumed). Codegen maps Value::undefined → None.
+        assert_unset_optional_is_undefined(hc0, "service", "hc0/command-variant");
+        assert_unset_optional_is_undefined(hc0, "state", "hc0/command-variant");
+        assert_unset_optional_is_undefined(hc0, "port", "hc0/command-variant");
+        assert_unset_optional_is_undefined(hc0, "host", "hc0/command-variant");
+
+        // health_checks[1]: service variant.
+        let hc1 = &alpha_checks_list.values[1];
+        assert_eq!(hc1.as_schema().name, "HealthCheck");
+        assert_eq!(hc1.dict_get_value("type").unwrap().as_str(), "service");
+        assert_eq!(hc1.dict_get_value("service").unwrap().as_str(), "sshd");
+        assert_eq!(hc1.dict_get_value("state").unwrap().as_str(), "running");
+        assert_unset_optional_is_undefined(hc1, "command", "hc1/service-variant");
+        assert_unset_optional_is_undefined(hc1, "expected_exit", "hc1/service-variant");
+        assert_unset_optional_is_undefined(hc1, "port", "hc1/service-variant");
+        assert_unset_optional_is_undefined(hc1, "host", "hc1/service-variant");
+
+        // health_checks[2]: port variant (host left unset to exercise the
+        // both-optionals-present-and-absent case within a single variant).
+        let hc2 = &alpha_checks_list.values[2];
+        assert_eq!(hc2.as_schema().name, "HealthCheck");
+        assert_eq!(hc2.dict_get_value("type").unwrap().as_str(), "port");
+        assert_eq!(hc2.dict_get_value("port").unwrap().as_int(), 22);
+        assert_unset_optional_is_undefined(hc2, "host", "hc2/port-variant");
+        assert_unset_optional_is_undefined(hc2, "command", "hc2/port-variant");
+        assert_unset_optional_is_undefined(hc2, "expected_exit", "hc2/port-variant");
+        assert_unset_optional_is_undefined(hc2, "service", "hc2/port-variant");
+        assert_unset_optional_is_undefined(hc2, "state", "hc2/port-variant");
+
+        // VM[1]: beta — every defaultable field defaulted.
+        let beta = &vms_list.values[1];
+        assert!(beta.is_schema());
+        assert_eq!(beta.as_schema().name, "Vm");
+        assert_eq!(beta.dict_get_value("name").unwrap().as_str(), "beta");
+        assert_eq!(beta.dict_get_value("memory_mb").unwrap().as_int(), 1024);
+        assert_eq!(beta.dict_get_value("cores").unwrap().as_int(), 2);
+        let beta_checks = beta
+            .dict_get_value("health_checks")
+            .expect("health_checks default did not flow through on beta");
+        assert!(beta_checks.is_list());
+        assert_eq!(
+            beta_checks.as_list_ref().values.len(),
+            0,
+            "expected health_checks default to be empty list"
+        );
+    }
+
+    /// Helper for `test_structured_value_tilley_shaped_fixture`. Asserts
+    /// that an optional schema field declared `field?: T` and not set on
+    /// the instance surfaces in the `ValueRef` tree as `Value::undefined`
+    /// — the empirically-verified D5 answer.
+    ///
+    /// If the runtime ever changes to produce `Value::none` (the
+    /// originally-hypothesised mapping), absent-from-dict, or anything
+    /// else, the failure message records which alternative we got so the
+    /// codegen mapping can be updated in lockstep.
+    fn assert_unset_optional_is_undefined(
+        schema_val: &kcl_runtime::ValueRef,
+        field: &str,
+        ctx: &str,
+    ) {
+        match schema_val.dict_get_value(field) {
+            Some(v) if v.is_undefined() => { /* D5 empirical answer holds */ }
+            Some(v) if v.is_none() => panic!(
+                "D5 drift: unset optional `{field}` on {ctx} is Value::none, \
+                 not Value::undefined — runtime semantics changed; update codegen"
+            ),
+            Some(v) => panic!(
+                "D5 drift: unset optional `{field}` on {ctx} is neither undefined nor none; \
+                 got type={}",
+                v.type_str()
+            ),
+            None => panic!(
+                "D5 drift: unset optional `{field}` on {ctx} is absent-from-dict; \
+                 codegen needs a different lookup pattern"
+            ),
+        }
+    }
 }
