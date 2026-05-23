@@ -610,6 +610,66 @@ mod structured_output_tests {
         );
     }
 
+    /// Phase 2.5 regression test: two calls to `yaml.encode` within a
+    /// single KCL program return correct independent values.
+    ///
+    /// Pre-Phase-2.5, the runtime's `kcl_value_plan_to_json/yaml` C-API
+    /// functions wrote each result into `Context::json_result` /
+    /// `Context::yaml_result` and returned a `ValueRef::str` referencing
+    /// the context-resident storage. A second call would overwrite those
+    /// fields — and any C consumer that held the first call's `*char` past
+    /// the second would read corrupted data. Post-Phase-2.5, the returned
+    /// `ValueRef` owns its String independently and the two calls cannot
+    /// interfere. This test exercises the doubled-call path from user code.
+    #[test]
+    fn test_yaml_encode_twice_independent_results() {
+        let sess = Arc::new(ParseSession::default());
+        let args = ExecProgramArgs {
+            k_filename_list: vec!["test.k".to_string()],
+            k_code_list: vec![
+                concat!(
+                    "import yaml\n",
+                    "first = yaml.encode({a = 1})\n",
+                    "second = yaml.encode({b = 2})\n",
+                )
+                .to_string(),
+            ],
+            ..Default::default()
+        };
+        let result = exec_program(sess, &args).expect("evaluation failed");
+        assert!(
+            result.err_message.is_empty(),
+            "unexpected err_message: {}",
+            result.err_message
+        );
+        // The two yaml.encode results must reflect the distinct inputs;
+        // pre-cleanup, the second call's context-resident storage could
+        // bleed through and both KCL string values would have been
+        // equal. Asserting their distinctness catches the regression.
+        let parsed: Value =
+            serde_json::from_str(&result.json_result).expect("json_result invalid");
+        let first = parsed
+            .get("first")
+            .and_then(Value::as_str)
+            .expect("first not a string");
+        let second = parsed
+            .get("second")
+            .and_then(Value::as_str)
+            .expect("second not a string");
+        assert!(
+            first.contains("a: 1"),
+            "first did not encode {{a=1}}: {first}"
+        );
+        assert!(
+            second.contains("b: 2"),
+            "second did not encode {{b=2}}: {second}"
+        );
+        assert_ne!(
+            first, second,
+            "first and second yaml.encode results collapsed to the same value"
+        );
+    }
+
     /// The structured-output path returns the dict-merged global scope
     /// directly. An empty program should produce an empty dict, mirroring
     /// what the string path emits (`{}` / empty YAML).

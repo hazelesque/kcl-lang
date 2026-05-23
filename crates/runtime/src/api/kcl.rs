@@ -359,10 +359,6 @@ pub struct Context {
     pub objects: IndexSet<usize>,
     /// Log message used to store print results.
     pub log_message: String,
-    /// Planned JSON result
-    pub json_result: String,
-    /// Planned YAML result
-    pub yaml_result: String,
     /// Panic information at runtime
     pub panic_info: PanicInfo,
     /// Planning options

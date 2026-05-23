@@ -266,24 +266,17 @@ impl<'ctx> Evaluator<'ctx> {
 
     pub fn plan_value(&self, value: &ValueRef) -> (String, String) {
         let mut ctx = self.runtime_ctx.borrow_mut();
-        // If custom_manifests_output is set (e.g., from yaml_stream), use it directly for YAML
+        // If custom_manifests_output is set (e.g. from yaml_stream), the
+        // pre-formatted YAML stream is the canonical output for this
+        // evaluation; round-trip it through from_yaml_stream + plan to
+        // get the equivalent JSON stream.
         match ctx.buffer.custom_manifests_output.take() {
-            Some(output) => {
-                // Use the pre-formatted YAML stream directly
-                let yaml_string = output.clone();
-                // For JSON, parse the YAML stream and format as JSON stream
+            Some(yaml_string) => {
                 let value = ValueRef::from_yaml_stream(&mut ctx, &yaml_string).unwrap();
                 let (json_string, _) = value.plan(&ctx);
-                ctx.json_result = json_string.clone();
-                ctx.yaml_result = yaml_string.clone();
                 (json_string, yaml_string)
             }
-            None => {
-                let (json_string, yaml_string) = value.plan(&ctx);
-                ctx.json_result = json_string.clone();
-                ctx.yaml_result = yaml_string.clone();
-                (json_string, yaml_string)
-            }
+            None => value.plan(&ctx),
         }
     }
 }
