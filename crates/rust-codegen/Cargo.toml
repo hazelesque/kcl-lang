@@ -1,0 +1,28 @@
+[package]
+name = "kcl-rust-codegen"
+version.workspace = true
+edition.workspace = true
+description = "Generate Rust types + TryFrom<&ValueRef> impls from KCL schemas"
+
+# Strict lints per the fork's scm-infra style conventions.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "deny"
+todo = "deny"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+kcl-ast.workspace = true
+kcl-error.workspace = true
+kcl-parser.workspace = true
+kcl-sema.workspace = true
+
+[dev-dependencies]
+# For end-to-end tests that round-trip generated types through
+# kcl-embed evaluation.
+kcl-embed.workspace = true
+kcl-runtime.workspace = true
