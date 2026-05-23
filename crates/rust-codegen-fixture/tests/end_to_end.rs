@@ -9,7 +9,7 @@
 //! typed Rust. No JSON. No hand-written struct definitions.
 
 use kcl_embed::{Embedded, EvaluateArgs};
-use kcl_rust_codegen_fixture::{Disk, Vm};
+use kcl_rust_codegen_fixture::{Disk, DiskStorageClass, Vm, VmState};
 
 const VM_PROGRAM: &str = include_str!("../schemas.k");
 
@@ -58,6 +58,43 @@ fn generated_types_roundtrip_a_real_vm() {
         vm.disks[1].label, None,
         "unset optional field should map to None per D5"
     );
+
+    // String-literal-union enum: default flows through and matches
+    // the source literal.
+    assert_eq!(vm.state, VmState::Stopped);
+    assert_eq!(vm.disks[0].storage_class, DiskStorageClass::Ssd);
+    assert_eq!(vm.disks[1].storage_class, DiskStorageClass::Ssd);
+}
+
+/// String-literal-union enum codegen end-to-end: the user program
+/// sets `state = "running"`; the generated `VmState` enum's TryFrom
+/// successfully maps it to the corresponding variant.
+#[test]
+fn string_literal_union_codegens_to_enum_with_variants() {
+    let mut embedded = Embedded::new();
+    embedded
+        .register_module("schemas", VM_PROGRAM)
+        .expect("register");
+    let ready = embedded.build();
+
+    let outcome = ready
+        .evaluate(EvaluateArgs {
+            main_source: concat!(
+                "import schemas\n",
+                "vm = schemas.Vm {\n",
+                "    name = \"alpha\"\n",
+                "    state = \"running\"\n",
+                "    disks = [schemas.Disk {size_gb = 100, storage_class = \"nvme\"}]\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        })
+        .expect("evaluate");
+
+    let vm = Vm::try_from(&outcome.value.dict_get_value("vm").unwrap()).expect("try_into");
+    assert_eq!(vm.state, VmState::Running);
+    assert_eq!(vm.disks[0].storage_class, DiskStorageClass::Nvme);
 }
 
 /// Defaults flow through end-to-end: a Vm constructed with only the

@@ -1,11 +1,12 @@
 //! Intermediate representation for KCL schemas being codegen'd.
 //!
-//! [`SchemaIR`] / [`FieldIR`] / [`FieldKind`] are the data structures
-//! the emitter walks. They're derived from `kcl-sema`'s resolved
-//! `SchemaType` + `SchemaAttr` representation but stripped down to
-//! the subset codegen actually consumes — fields, optionality, kind,
-//! plus enough source-location info to cite the schema in generated
-//! rustdoc.
+//! [`ModuleIR`] is the top-level data structure the emitter walks.
+//! It holds the schemas in declaration order plus any string-literal
+//! unions ([`EnumIR`]) lifted out as named Rust enums.
+//!
+//! [`SchemaIR`] / [`FieldIR`] / [`FieldKind`] / [`EnumIR`] are
+//! derived from `kcl-sema`'s resolved `SchemaType` + `SchemaAttr`
+//! representation, stripped down to the subset codegen consumes.
 
 use kcl_ast::ast::Program;
 use kcl_sema::resolver::scope::ProgramScope;
@@ -13,9 +14,20 @@ use kcl_sema::ty::{SchemaType, TypeKind};
 
 use crate::CodegenError;
 
+/// Top-level codegen IR for a single KCL source file.
+#[derive(Debug, Clone, Default)]
+pub struct ModuleIR {
+    /// Schema definitions in declaration order.
+    pub schemas: Vec<SchemaIR>,
+    /// String-literal-union enums lifted out for naming. Each
+    /// occurrence of e.g. `field: "a" | "b" | "c"` produces one
+    /// entry here, with a name derived from `<SchemaName><FieldName>`
+    /// (PascalCase concat).
+    pub enums: Vec<EnumIR>,
+}
+
 /// Codegen IR for a single KCL schema. Produced by [`extract_schemas`]
-/// from the resolved program; consumed by `emit_rust_source` in
-/// `lib.rs`.
+/// from the resolved program; consumed by the emitter.
 #[derive(Debug, Clone)]
 pub struct SchemaIR {
     /// The schema's KCL name. Reused verbatim as the generated Rust
@@ -38,7 +50,9 @@ pub struct SchemaIR {
 /// Codegen IR for a single field within a [`SchemaIR`].
 #[derive(Debug, Clone)]
 pub struct FieldIR {
-    /// Field name. Reused verbatim as the generated Rust field name.
+    /// Field name as it appears in KCL source. Used verbatim as the
+    /// generated Rust field name *after* keyword escaping
+    /// (`type` → `r#type`, etc.).
     pub name: String,
     /// Field type kind. See [`FieldKind`] for the supported subset.
     pub kind: FieldKind,
@@ -49,6 +63,21 @@ pub struct FieldIR {
     /// during evaluation, so codegen does not emit a `Default` impl
     /// (per the plan's Phase 4 non-scope). Stored for rustdoc.
     pub has_default: bool,
+}
+
+/// Codegen IR for a string-literal union, lifted to a named Rust enum.
+#[derive(Debug, Clone)]
+pub struct EnumIR {
+    /// Generated Rust type name (PascalCase). Unique within the
+    /// emitted module.
+    pub rust_name: String,
+    /// Variant strings as they appear in the KCL source. Order
+    /// preserved; the generated Rust enum has one variant per entry,
+    /// named via [`pascal_case`].
+    pub variants: Vec<String>,
+    /// The schema + field this union was lifted from. Surfaces in
+    /// the generated enum's rustdoc.
+    pub origin: String,
 }
 
 /// The Rust-type-shape a [`FieldIR`] codegens to.
@@ -62,9 +91,7 @@ pub enum FieldKind {
     Bool,
     /// `str` (String)
     Str,
-    /// `[T]` — list of the inner kind. KCL list elements are
-    /// homogeneous-typed via sema; the inner kind is whatever
-    /// `TypeKind::List`'s element type resolved to.
+    /// `[T]` — list of the inner kind.
     List(Box<FieldKind>),
     /// `{K:V}` — dict with the given key and value kinds.
     Dict(Box<FieldKind>, Box<FieldKind>),
@@ -72,6 +99,10 @@ pub enum FieldKind {
     /// as the other schema's generated Rust type and delegates to
     /// that type's `TryFrom<&ValueRef>` in the impl.
     Schema(String),
+    /// Reference to a string-literal union enum (lifted to
+    /// [`ModuleIR::enums`]) by its generated Rust name. The variants
+    /// themselves are stored on the [`EnumIR`].
+    StrEnum(String),
     /// A kind the Phase 4 MVP doesn't yet handle. Carries a
     /// descriptive label so codegen errors point at the actual
     /// unsupported shape rather than `Unknown`.
@@ -94,6 +125,7 @@ impl FieldKind {
                 v.to_rust_type()
             ),
             FieldKind::Schema(name) => name.clone(),
+            FieldKind::StrEnum(name) => name.clone(),
             FieldKind::Unsupported(label) => format!("/* UNSUPPORTED: {label} */ ()"),
         }
     }
@@ -106,8 +138,6 @@ impl FieldKind {
     }
 
     /// Recursively check whether any nested kind is Unsupported.
-    /// `Vec<Unsupported>` should fail emission just like
-    /// `Unsupported` itself.
     pub fn has_unsupported(&self) -> bool {
         match self {
             FieldKind::Unsupported(_) => true,
@@ -127,12 +157,13 @@ impl FieldKind {
 }
 
 /// Walk the resolved program's main package, extract every schema
-/// declaration as a [`SchemaIR`].
-pub(crate) fn extract_schemas(
+/// declaration as a [`SchemaIR`], collect any lifted enums into the
+/// shared [`ModuleIR`].
+pub(crate) fn extract_module(
     program: &Program,
     scope: &ProgramScope,
-) -> Result<Vec<SchemaIR>, CodegenError> {
-    let mut out = Vec::new();
+) -> Result<ModuleIR, CodegenError> {
+    let mut module = ModuleIR::default();
     let main_pkg_scopes = match program.pkgs.get(kcl_ast::MAIN_PKG) {
         Some(_) => match scope.scope_map.get(kcl_ast::MAIN_PKG) {
             Some(s) => s,
@@ -143,7 +174,7 @@ pub(crate) fn extract_schemas(
                 )));
             }
         },
-        None => return Ok(out),
+        None => return Ok(module),
     };
 
     let scope_borrow = main_pkg_scopes.borrow();
@@ -153,18 +184,20 @@ pub(crate) fn extract_schemas(
             TypeKind::Schema(schema_ty) => schema_ty.clone(),
             _ => continue,
         };
-        // Mixins are transparent per Phase 4A D10 memo: the consuming
-        // schema gets all the mixed-in fields inline; emit no
-        // standalone type for the mixin itself.
         if ty.is_mixin || ty.is_protocol {
             continue;
         }
-        out.push(schema_to_ir(name.clone(), &ty)?);
+        let schema_ir = schema_to_ir(name.clone(), &ty, &mut module)?;
+        module.schemas.push(schema_ir);
     }
-    Ok(out)
+    Ok(module)
 }
 
-fn schema_to_ir(name: String, ty: &SchemaType) -> Result<SchemaIR, CodegenError> {
+fn schema_to_ir(
+    name: String,
+    ty: &SchemaType,
+    module: &mut ModuleIR,
+) -> Result<SchemaIR, CodegenError> {
     if ty.base.is_some() {
         return Err(CodegenError::UnsupportedFeature {
             feature: "schema_inheritance",
@@ -174,7 +207,7 @@ fn schema_to_ir(name: String, ty: &SchemaType) -> Result<SchemaIR, CodegenError>
 
     let mut fields = Vec::with_capacity(ty.attrs.len());
     for (field_name, attr) in ty.attrs.iter() {
-        let kind = field_kind_for(&attr.ty.kind);
+        let kind = field_kind_for(&attr.ty.kind, &name, field_name, module);
         if kind.has_unsupported() {
             return Err(CodegenError::UnsupportedFeature {
                 feature: "field_kind",
@@ -204,24 +237,73 @@ fn schema_to_ir(name: String, ty: &SchemaType) -> Result<SchemaIR, CodegenError>
     })
 }
 
-fn field_kind_for(ty_kind: &TypeKind) -> FieldKind {
+/// Map a `kcl_sema::ty::TypeKind` to a [`FieldKind`]. Side-effects:
+/// if the type is a string-literal union, an [`EnumIR`] is added to
+/// `module.enums` and the returned `FieldKind::StrEnum` references it
+/// by name.
+fn field_kind_for(
+    ty_kind: &TypeKind,
+    schema_name: &str,
+    field_name: &str,
+    module: &mut ModuleIR,
+) -> FieldKind {
     match ty_kind {
         TypeKind::Int | TypeKind::IntLit(_) => FieldKind::Int,
         TypeKind::Float | TypeKind::FloatLit(_) => FieldKind::Float,
         TypeKind::Bool | TypeKind::BoolLit(_) => FieldKind::Bool,
         TypeKind::Str | TypeKind::StrLit(_) => FieldKind::Str,
-        TypeKind::List(item_ty) => FieldKind::List(Box::new(field_kind_for(&item_ty.kind))),
+        TypeKind::List(item_ty) => FieldKind::List(Box::new(field_kind_for(
+            &item_ty.kind,
+            schema_name,
+            field_name,
+            module,
+        ))),
         TypeKind::Dict(dict_ty) => FieldKind::Dict(
-            Box::new(field_kind_for(&dict_ty.key_ty.kind)),
-            Box::new(field_kind_for(&dict_ty.val_ty.kind)),
+            Box::new(field_kind_for(
+                &dict_ty.key_ty.kind,
+                schema_name,
+                field_name,
+                module,
+            )),
+            Box::new(field_kind_for(
+                &dict_ty.val_ty.kind,
+                schema_name,
+                field_name,
+                module,
+            )),
         ),
         TypeKind::Schema(schema_ty) => FieldKind::Schema(schema_ty.name.clone()),
         TypeKind::Function(_) => FieldKind::Unsupported(
             "function-typed field (D4 corollary: codegen-time error)".to_string(),
         ),
-        TypeKind::Union(_) => FieldKind::Unsupported(
-            "union type (Phase 4 step 5 will handle this)".to_string(),
-        ),
+        TypeKind::Union(members) => {
+            // String-literal union: `"a" | "b" | "c"`. Codegen lifts
+            // this to a named Rust enum at module scope and the field
+            // becomes a reference to that enum.
+            if let Some(variants) = as_str_literal_union(members) {
+                let rust_name = lift_enum_name(schema_name, field_name);
+                module.enums.push(EnumIR {
+                    rust_name: rust_name.clone(),
+                    variants,
+                    origin: format!("{schema_name}.{field_name}"),
+                });
+                FieldKind::StrEnum(rust_name)
+            } else {
+                FieldKind::Unsupported(format!(
+                    "union of non-string-literal types (Phase 4 MVP only supports \
+                     string-literal unions like `\"a\" | \"b\"`; for tagged-enum codegen \
+                     of overlapping schemas with a discriminator field, add a \
+                     `# @rust: tagged_enum(discriminator = \"...\")` annotation — \
+                     pending future codegen support — or write the Rust type by hand): \
+                     {} | {}",
+                    members.first().map(|t| t.ty_str()).unwrap_or_default(),
+                    members
+                        .get(1)
+                        .map(|t| t.ty_str())
+                        .unwrap_or_else(|| "...".to_string()),
+                ))
+            }
+        }
         TypeKind::NumberMultiplier(_) => {
             FieldKind::Unsupported("unit-typed value (deferred from Phase 4 MVP)".to_string())
         }
@@ -230,5 +312,68 @@ fn field_kind_for(ty_kind: &TypeKind) -> FieldKind {
         TypeKind::Void => FieldKind::Unsupported("Void-typed field".to_string()),
         TypeKind::Module(_) => FieldKind::Unsupported("module-typed field".to_string()),
         TypeKind::Named(name) => FieldKind::Unsupported(format!("Named type alias `{name}`")),
+    }
+}
+
+/// Match `members` against the string-literal-union shape. Returns
+/// the variant strings in source order if every member is a
+/// `StrLit`, otherwise `None`.
+fn as_str_literal_union(members: &[std::sync::Arc<kcl_sema::ty::Type>]) -> Option<Vec<String>> {
+    let mut out = Vec::with_capacity(members.len());
+    for m in members {
+        match &m.kind {
+            TypeKind::StrLit(s) => out.push(s.clone()),
+            _ => return None,
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
+/// Build the lifted enum's Rust type name: `<SchemaName><FieldName>`
+/// in PascalCase. For Tilley's `TestAssertion.type: "command" | ...`
+/// this produces `TestAssertionType`.
+fn lift_enum_name(schema_name: &str, field_name: &str) -> String {
+    format!("{}{}", schema_name, pascal_case(field_name))
+}
+
+/// PascalCase a snake_case identifier. `audit_id` -> `AuditId`,
+/// `port` -> `Port`. Idempotent on already-PascalCase input.
+pub(crate) fn pascal_case(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut next_upper = true;
+    for c in s.chars() {
+        if c == '_' {
+            next_upper = true;
+            continue;
+        }
+        if next_upper {
+            for u in c.to_uppercase() {
+                out.push(u);
+            }
+            next_upper = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Rust reserved words that conflict with KCL field names. The
+/// codegen wraps the field name in `r#` when one of these appears so
+/// the generated struct is syntactically valid.
+pub(crate) fn escape_rust_keyword(name: &str) -> String {
+    const KEYWORDS: &[&str] = &[
+        "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn",
+        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+        "return", "self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use",
+        "where", "while", "async", "await", "dyn",
+    ];
+    if KEYWORDS.contains(&name) {
+        format!("r#{name}")
+    } else {
+        name.to_string()
     }
 }

@@ -1,36 +1,6 @@
-//! Emit Rust source text from a `Vec<SchemaIR>`.
-//!
-//! Generated code shape:
-//!
-//! ```text
-//! // AUTO-GENERATED banner
-//! #![allow(...)]
-//!
-//! mod _kcl_codegen_helpers { ... }  // small per-file helper module
-//!
-//! /// Generated from src/schemas/core.k (line 10)
-//! pub struct Vm {
-//!     pub name: String,
-//!     pub memory_mb: i64,
-//!     pub notes: Option<String>,
-//! }
-//!
-//! impl TryFrom<&kcl_runtime::ValueRef> for Vm {
-//!     type Error = String;
-//!     fn try_from(v: &kcl_runtime::ValueRef) -> Result<Self, Self::Error> {
-//!         let name = _kcl_codegen_helpers::require(...)?;
-//!         ...
-//!         Ok(Vm { name, memory_mb, notes })
-//!     }
-//! }
-//! ```
-//!
-//! The helper module is emitted once per output file and contains
-//! the type-conversion primitives every TryFrom impl uses. The
-//! per-schema TryFrom impls are short and explicit — each field maps
-//! to one call into the helpers.
+//! Emit Rust source text from a [`ModuleIR`].
 
-use crate::ir::{FieldIR, FieldKind, SchemaIR};
+use crate::ir::{EnumIR, FieldIR, FieldKind, ModuleIR, SchemaIR, escape_rust_keyword, pascal_case};
 use crate::CodegenError;
 
 const BANNER: &str = "\
@@ -52,9 +22,7 @@ const BANNER: &str = "\
 
 const HELPERS: &str = r##"
 /// Helper functions used by the generated `TryFrom<&ValueRef>`
-/// implementations. Emitted once per file; not part of the public
-/// API. Kept in a private module so generated types don't pollute
-/// the consumer's namespace.
+/// implementations.
 mod _kcl_codegen_helpers {
     use kcl_runtime::ValueRef;
 
@@ -89,7 +57,6 @@ mod _kcl_codegen_helpers {
         }
     }
 
-    /// Read a required field from a schema-or-dict ValueRef.
     pub fn require<T, F>(
         v: &ValueRef,
         field: &str,
@@ -105,11 +72,6 @@ mod _kcl_codegen_helpers {
         }
     }
 
-    /// Read an optional field (`field?: T` in KCL) from a
-    /// schema-or-dict ValueRef. Both `Value::undefined` and
-    /// `Value::none` map to `None` per the D5 codegen mapping; an
-    /// absent field also maps to `None` (defensive). Anything else
-    /// runs through `conv`.
     pub fn optional<T, F>(
         v: &ValueRef,
         field: &str,
@@ -128,8 +90,6 @@ mod _kcl_codegen_helpers {
         }
     }
 
-    /// Convert a list `ValueRef` into a `Vec<T>` by applying `conv`
-    /// to each element. Errors include the offending element index.
     pub fn from_list<T, F>(v: &ValueRef, mut conv: F) -> Result<Vec<T>, String>
     where
         F: FnMut(&ValueRef) -> Result<T, String>,
@@ -145,9 +105,6 @@ mod _kcl_codegen_helpers {
         Ok(out)
     }
 
-    /// Convert a dict `ValueRef` into a `HashMap<String, V>` (KCL
-    /// dicts are str-keyed at the runtime layer) by applying `conv`
-    /// to each value. Errors include the offending key.
     pub fn from_dict<V, F>(
         v: &ValueRef,
         mut conv: F,
@@ -172,16 +129,73 @@ mod _kcl_codegen_helpers {
 
 "##;
 
-/// Emit a single Rust source string for the given `SchemaIR` list.
-pub(crate) fn emit_rust_source(schemas: &[SchemaIR]) -> Result<String, CodegenError> {
+pub(crate) fn emit_rust_source(module: &ModuleIR) -> Result<String, CodegenError> {
     let mut out = String::with_capacity(BANNER.len() + HELPERS.len() + 1024);
     out.push_str(BANNER);
     out.push_str(HELPERS);
-    for schema in schemas {
+    for e in &module.enums {
+        emit_enum(&mut out, e);
+    }
+    for schema in &module.schemas {
         emit_struct(&mut out, schema);
         emit_try_from(&mut out, schema);
     }
     Ok(out)
+}
+
+fn emit_enum(out: &mut String, e: &EnumIR) {
+    out.push_str(&format!(
+        "/// Generated from {} — lifted from a KCL string-literal union.\n",
+        e.origin
+    ));
+    out.push_str("#[derive(Debug, Clone, PartialEq, Eq, Hash)]\n");
+    out.push_str(&format!("pub enum {} {{\n", e.rust_name));
+    for variant in &e.variants {
+        out.push_str(&format!("    /// KCL source literal: {variant:?}\n"));
+        out.push_str(&format!("    {},\n", pascal_case(variant)));
+    }
+    out.push_str("}\n\n");
+
+    // TryFrom<&ValueRef>: matches on the string content; rejects
+    // anything that isn't one of the declared literals.
+    out.push_str(&format!(
+        "impl TryFrom<&kcl_runtime::ValueRef> for {} {{\n",
+        e.rust_name
+    ));
+    out.push_str("    type Error = String;\n");
+    out.push_str("    fn try_from(v: &kcl_runtime::ValueRef) -> Result<Self, Self::Error> {\n");
+    out.push_str("        if !v.is_str() {\n");
+    out.push_str(&format!(
+        "            return Err(format!(\"expected str for {}, got {{}}\", v.type_str()));\n",
+        e.rust_name
+    ));
+    out.push_str("        }\n");
+    out.push_str("        match v.as_str().as_str() {\n");
+    for variant in &e.variants {
+        out.push_str(&format!(
+            "            {:?} => Ok({}::{}),\n",
+            variant,
+            e.rust_name,
+            pascal_case(variant)
+        ));
+    }
+    // Build the expected-list literal with each variant wrapped in
+    // escaped quotes so the generated Rust source compiles. (Naively
+    // interpolating `{:?}` on a Vec<String> produces unescaped
+    // double-quotes inside the surrounding string literal.)
+    let expected_list = e
+        .variants
+        .iter()
+        .map(|v| format!("\\\"{v}\\\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!(
+        "            other => Err(format!(\"unexpected {} literal {{other:?}}; expected one of [{expected_list}]\")),\n",
+        e.rust_name
+    ));
+    out.push_str("        }\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
 }
 
 fn emit_struct(out: &mut String, schema: &SchemaIR) {
@@ -200,13 +214,13 @@ fn emit_struct(out: &mut String, schema: &SchemaIR) {
     out.push_str(&format!("pub struct {} {{\n", schema.name));
     for field in &schema.fields {
         if field.has_default {
-            out.push_str(&format!(
-                "    /// Has a default value in the source schema; the KCL VM\n",
-            ));
             out.push_str(
-                "    /// populates it during evaluation, so this field is\n",
+                "    /// Has a default value in the source schema; the KCL VM populates it\n",
             );
-            out.push_str("    /// always present in the resulting `ValueRef`.\n");
+            out.push_str(
+                "    /// during evaluation, so this field is always present in the\n",
+            );
+            out.push_str("    /// resulting `ValueRef`.\n");
         }
         let rust_ty = field.kind.to_rust_type();
         let rust_ty = if field.optional {
@@ -214,7 +228,11 @@ fn emit_struct(out: &mut String, schema: &SchemaIR) {
         } else {
             rust_ty
         };
-        out.push_str(&format!("    pub {}: {},\n", field.name, rust_ty));
+        out.push_str(&format!(
+            "    pub {}: {},\n",
+            escape_rust_keyword(&field.name),
+            rust_ty
+        ));
     }
     out.push_str("}\n\n");
 }
@@ -257,7 +275,7 @@ fn emit_try_from(out: &mut String, schema: &SchemaIR) {
     }
     out.push_str(&format!("        Ok({name} {{\n"));
     for field in &schema.fields {
-        out.push_str(&format!("            {},\n", field.name));
+        out.push_str(&format!("            {},\n", escape_rust_keyword(&field.name)));
     }
     out.push_str("        })\n");
     out.push_str("    }\n");
@@ -266,22 +284,20 @@ fn emit_try_from(out: &mut String, schema: &SchemaIR) {
 
 fn emit_field_read(out: &mut String, parent: &str, field: &FieldIR) {
     let conv = emit_conv_closure(&field.kind);
+    let binding = escape_rust_keyword(&field.name);
     if field.optional {
         out.push_str(&format!(
             "        let {} = _kcl_codegen_helpers::optional(v, \"{}\", \"{}\", {})?;\n",
-            field.name, field.name, parent, conv
+            binding, field.name, parent, conv
         ));
     } else {
         out.push_str(&format!(
             "        let {} = _kcl_codegen_helpers::require(v, \"{}\", \"{}\", {})?;\n",
-            field.name, field.name, parent, conv
+            binding, field.name, parent, conv
         ));
     }
 }
 
-/// Emit a closure expression that, given a `&ValueRef`, converts it
-/// to the field's Rust type. Recursive: lists/dicts compose their
-/// item/value conversion.
 fn emit_conv_closure(kind: &FieldKind) -> String {
     match kind {
         FieldKind::Int => "_kcl_codegen_helpers::from_int".to_string(),
@@ -293,11 +309,6 @@ fn emit_conv_closure(kind: &FieldKind) -> String {
             format!("|f: &kcl_runtime::ValueRef| _kcl_codegen_helpers::from_list(f, {inner_conv})")
         }
         FieldKind::Dict(_key, val) => {
-            // KCL dicts are str-keyed at the runtime layer regardless
-            // of the declared key type; we currently only emit the
-            // value-conversion closure and rely on the helper to
-            // surface String keys. Non-String declared key types
-            // would be flagged in step 5 if the consumer needs them.
             let val_conv = emit_conv_closure(val);
             format!("|f: &kcl_runtime::ValueRef| _kcl_codegen_helpers::from_dict(f, {val_conv})")
         }
@@ -306,9 +317,12 @@ fn emit_conv_closure(kind: &FieldKind) -> String {
                 "|f: &kcl_runtime::ValueRef| <{name} as TryFrom<&kcl_runtime::ValueRef>>::try_from(f)"
             )
         }
+        FieldKind::StrEnum(name) => {
+            format!(
+                "|f: &kcl_runtime::ValueRef| <{name} as TryFrom<&kcl_runtime::ValueRef>>::try_from(f)"
+            )
+        }
         FieldKind::Unsupported(label) => {
-            // Should have been caught during IR construction; emit
-            // a compile-error sentinel just in case.
             format!("compile_error!(\"unsupported field kind: {label}\")")
         }
     }
@@ -329,9 +343,16 @@ mod tests {
         }
     }
 
+    fn module_with_schemas(schemas: Vec<SchemaIR>) -> ModuleIR {
+        ModuleIR {
+            schemas,
+            enums: Vec::new(),
+        }
+    }
+
     #[test]
     fn emit_primitive_struct() {
-        let schema = schema_ir_for(
+        let module = module_with_schemas(vec![schema_ir_for(
             "Vm",
             vec![
                 FieldIR {
@@ -353,45 +374,60 @@ mod tests {
                     has_default: false,
                 },
             ],
-        );
-        let out = emit_rust_source(&[schema]).expect("emit");
+        )]);
+        let out = emit_rust_source(&module).expect("emit");
         assert!(out.contains("pub struct Vm {"));
         assert!(out.contains("pub name: String,"));
         assert!(out.contains("pub memory_mb: i64,"));
         assert!(out.contains("pub notes: Option<String>,"));
-        assert!(out.contains(
-            "impl TryFrom<&kcl_runtime::ValueRef> for Vm"
-        ));
-        assert!(out.contains("_kcl_codegen_helpers::require(v, \"name\""));
-        assert!(out.contains("_kcl_codegen_helpers::optional(v, \"notes\""));
+        assert!(out.contains("impl TryFrom<&kcl_runtime::ValueRef> for Vm"));
     }
 
     #[test]
-    fn emit_list_of_nested_schema() {
-        let schemas = vec![
-            schema_ir_for(
-                "Disk",
-                vec![FieldIR {
-                    name: "size_gb".into(),
-                    kind: FieldKind::Int,
-                    optional: false,
-                    has_default: false,
-                }],
-            ),
-            schema_ir_for(
-                "Vm",
-                vec![FieldIR {
-                    name: "disks".into(),
-                    kind: FieldKind::List(Box::new(FieldKind::Schema("Disk".into()))),
-                    optional: false,
-                    has_default: false,
-                }],
-            ),
-        ];
-        let out = emit_rust_source(&schemas).expect("emit");
-        assert!(out.contains("pub disks: Vec<Disk>,"));
+    fn emit_str_enum_and_field() {
+        let mut module = module_with_schemas(vec![schema_ir_for(
+            "TestAssertion",
+            vec![FieldIR {
+                name: "type".into(),
+                kind: FieldKind::StrEnum("TestAssertionType".into()),
+                optional: false,
+                has_default: false,
+            }],
+        )]);
+        module.enums.push(EnumIR {
+            rust_name: "TestAssertionType".into(),
+            variants: vec!["command".into(), "service".into(), "port".into()],
+            origin: "TestAssertion.type".into(),
+        });
+        let out = emit_rust_source(&module).expect("emit");
+        // Enum definition
+        assert!(out.contains("pub enum TestAssertionType {"));
+        assert!(out.contains("    Command,"));
+        assert!(out.contains("    Service,"));
+        assert!(out.contains("    Port,"));
+        // Enum TryFrom matches the literals
+        assert!(out.contains("\"command\" => Ok(TestAssertionType::Command),"));
+        // Struct field uses the enum type
+        assert!(out.contains("pub r#type: TestAssertionType,"));
+        // Struct TryFrom delegates to enum's TryFrom
         assert!(out.contains(
-            "_kcl_codegen_helpers::from_list(f, |f: &kcl_runtime::ValueRef| <Disk as TryFrom"
+            "<TestAssertionType as TryFrom<&kcl_runtime::ValueRef>>::try_from(f)"
         ));
+    }
+
+    #[test]
+    fn escape_rust_keyword_field_names() {
+        let module = module_with_schemas(vec![schema_ir_for(
+            "Foo",
+            vec![FieldIR {
+                name: "type".into(),
+                kind: FieldKind::Str,
+                optional: false,
+                has_default: false,
+            }],
+        )]);
+        let out = emit_rust_source(&module).expect("emit");
+        assert!(out.contains("pub r#type: String,"));
+        assert!(out.contains("let r#type = _kcl_codegen_helpers::require(v, \"type\""));
     }
 }

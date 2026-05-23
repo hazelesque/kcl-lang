@@ -52,7 +52,7 @@ use kcl_sema::resolver::resolve_program;
 mod emit;
 mod ir;
 
-pub use ir::{FieldIR, FieldKind, SchemaIR};
+pub use ir::{EnumIR, FieldIR, FieldKind, ModuleIR, SchemaIR};
 
 /// The diagnostic type used by [`CodegenError`]; re-exported so
 /// callers can inspect ranges and messages without depending on
@@ -113,14 +113,14 @@ pub enum CodegenError {
 /// typically write this to `$OUT_DIR/<name>.rs` from a `build.rs`
 /// and `include!` it in their crate.
 pub fn generate_to_string(kcl_source: &str) -> Result<String, CodegenError> {
-    let schemas = analyse_inline_source(kcl_source)?;
-    emit_rust_source(&schemas)
+    let module = analyse_inline_source(kcl_source)?;
+    emit_rust_source(&module)
 }
 
 /// Walk a KCL source string through parser + sema and extract the
-/// `SchemaIR` list. Mostly for testing / introspection; production
-/// consumers use [`generate_to_string`].
-pub fn analyse_inline_source(kcl_source: &str) -> Result<Vec<SchemaIR>, CodegenError> {
+/// [`ModuleIR`] (schemas + lifted enums). Mostly for testing /
+/// introspection; production consumers use [`generate_to_string`].
+pub fn analyse_inline_source(kcl_source: &str) -> Result<ModuleIR, CodegenError> {
     let sess = Arc::new(ParseSession::default());
     let main_path = "__kcl_codegen_input__.k";
 
@@ -151,12 +151,12 @@ pub fn analyse_inline_source(kcl_source: &str) -> Result<Vec<SchemaIR>, CodegenE
         return Err(CodegenError::Resolve(resolve_errors.into_iter().collect()));
     }
 
-    ir::extract_schemas(&program, &scope)
+    ir::extract_module(&program, &scope)
 }
 
-/// Emit Rust source text from a list of `SchemaIR` entries.
-fn emit_rust_source(schemas: &[SchemaIR]) -> Result<String, CodegenError> {
-    emit::emit_rust_source(schemas)
+/// Emit Rust source text from a [`ModuleIR`].
+fn emit_rust_source(module: &ModuleIR) -> Result<String, CodegenError> {
+    emit::emit_rust_source(module)
 }
 
 #[cfg(test)]
@@ -171,9 +171,9 @@ mod tests {
             "    memory_mb: int = 1024\n",
             "    notes?: str\n",
         );
-        let schemas = analyse_inline_source(src).expect("analyse should succeed");
-        assert_eq!(schemas.len(), 1);
-        let vm = &schemas[0];
+        let module = analyse_inline_source(src).expect("analyse should succeed");
+        assert_eq!(module.schemas.len(), 1);
+        let vm = &module.schemas[0];
         assert_eq!(vm.name, "Vm");
         assert_eq!(vm.fields.len(), 3);
         // Field order from KCL source is preserved through sema's
@@ -186,6 +186,28 @@ mod tests {
         assert!(vm.fields[1].has_default);
         assert_eq!(vm.fields[2].name, "notes");
         assert!(vm.fields[2].optional);
+    }
+
+    #[test]
+    fn analyse_lifts_string_literal_union_to_enum() {
+        let src = concat!(
+            "schema TestAssertion:\n",
+            "    type: \"command\" | \"service\" | \"port\"\n",
+            "    command?: str\n",
+        );
+        let module = analyse_inline_source(src).expect("analyse");
+        assert_eq!(module.schemas.len(), 1);
+        assert_eq!(module.enums.len(), 1, "expected one lifted enum");
+        let lifted = &module.enums[0];
+        assert_eq!(lifted.rust_name, "TestAssertionType");
+        assert_eq!(lifted.variants, vec!["command", "service", "port"]);
+        assert_eq!(lifted.origin, "TestAssertion.type");
+        let type_field = &module.schemas[0].fields[0];
+        assert_eq!(type_field.name, "type");
+        assert!(matches!(
+            &type_field.kind,
+            FieldKind::StrEnum(name) if name == "TestAssertionType"
+        ));
     }
 
     #[test]
