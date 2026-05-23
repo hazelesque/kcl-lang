@@ -39,10 +39,15 @@
 //! ```
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use kcl_parser::VirtualPackage;
+use kcl_ast::ast;
+use kcl_parser::{KCLModuleCache, LoadProgramOptions, ParseSession, VirtualPackage, load_program};
+use kcl_runner::{ExecProgramArgs, FastRunner, RunnerOptions};
 use kcl_runtime::ValueRef;
+use kcl_sema::resolver::resolve_program;
 
 /// The diagnostic type used throughout this crate's error surface.
 ///
@@ -255,21 +260,65 @@ impl Embedded {
     }
 }
 
+/// Synthetic path used for the in-memory main program when an
+/// `EvaluateArgs::main_source` is provided. The KCL parser pairs this
+/// with `k_code_list` entries during compile-entry construction (see
+/// `kcl_parser::get_compile_entries_from_paths`); the path string is
+/// opaque to the parser apart from being used as the source's
+/// reported filename in diagnostics.
+const VIRTUAL_MAIN_FILENAME: &str = "__kcl_embed_main__.k";
+
 impl EmbeddedReady {
     /// Evaluate a KCL program against the frozen module registry.
     ///
-    /// **Not yet implemented** in this step of the restructuring; the
-    /// loader-side wiring (Phase 3 step 2) and this crate's public
-    /// surface (step 3) are landed first so the API shape is
-    /// reviewable before the evaluation plumbing is wired through.
-    /// Phase 3 step 4 (the next commit) connects this to
-    /// `kcl_runner::FastRunner::run_to_value` via a `catch_unwind`
-    /// bridge.
+    /// `args.main_source` is the top-level program text. Any `import`
+    /// statements in it (or in registered modules transitively
+    /// imported from it) resolve through the registry first, then
+    /// fall back to disk via the existing loader machinery. The
+    /// returned [`EvaluateOutcome::value`] is the dict-merged global
+    /// scope as a structured [`ValueRef`]; see
+    /// `docs/dev_guide/valueref-shape.md` for the contract.
+    ///
+    /// **Panic bridging:** evaluation is wrapped in
+    /// `std::panic::catch_unwind(AssertUnwindSafe(...))`. The
+    /// `AssertUnwindSafe` is deliberate — the underlying evaluator
+    /// holds `Rc<RefCell<...>>` and is not `UnwindSafe`, but the
+    /// state is dropped immediately after a caught panic so the
+    /// obligation is satisfied. Phase 6a will refine this from a
+    /// blanket bridge into per-site `Result` propagation; until then,
+    /// caught panics surface as [`EvaluationError::Internal`].
+    ///
+    /// **Diagnostic granularity:** parse errors surface as
+    /// [`EvaluationError::Parse`], sema/resolve errors as
+    /// [`EvaluationError::Resolve`], and runtime evaluation failures
+    /// (check-block violations, asserts, runtime type mismatches) as
+    /// [`EvaluationError::Evaluate`]. The runtime-failure case
+    /// currently surfaces as a single best-effort [`Diagnostic`]
+    /// derived from the runner's `err_message` string — Phase 6a
+    /// will swap this for direct structured propagation.
     pub fn evaluate(
         &self,
-        _args: EvaluateArgs,
+        args: EvaluateArgs,
     ) -> Result<EvaluateOutcome, EvaluationError> {
-        Err(EvaluationError::Internal(Box::new(NotYetImplemented)))
+        let exec_args = build_exec_args(&args);
+        let load_opts = self.build_load_options(&args);
+        let module_cache = self.build_module_cache();
+
+        let sess = Arc::new(ParseSession::default());
+
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            evaluate_inner(sess.clone(), exec_args, load_opts, module_cache)
+        }));
+
+        match outcome {
+            Ok(result) => result,
+            Err(panic_payload) => {
+                let msg = kcl_error::err_to_str(panic_payload);
+                Err(EvaluationError::Internal(Box::new(
+                    BridgedPanicError(msg),
+                )))
+            }
+        }
     }
 
     /// Number of registered virtual packages. Exposed for tests and
@@ -277,13 +326,203 @@ impl EmbeddedReady {
     pub fn registered_module_count(&self) -> usize {
         self.virtual_packages.len()
     }
+
+    /// Build the `LoadProgramOptions` for this evaluation, threading
+    /// the frozen `virtual_packages` map plus any caller-provided
+    /// `external_packages` for disk-resolved packages.
+    fn build_load_options(&self, args: &EvaluateArgs) -> LoadProgramOptions {
+        let mut package_maps = HashMap::new();
+        for (name, path) in &args.external_packages {
+            package_maps.insert(name.clone(), path.to_string_lossy().to_string());
+        }
+        LoadProgramOptions {
+            work_dir: args
+                .work_dir
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            k_code_list: vec![args.main_source.clone()],
+            package_maps,
+            virtual_packages: self.virtual_packages.clone(),
+            ..Default::default()
+        }
+    }
+
+    /// Build a `KCLModuleCache` pre-populated with `source_code`
+    /// entries for every synthetic file path the registry advertises.
+    /// `parse_file`'s lookup at `crates/parser/src/lib.rs:704–712`
+    /// consults this cache before falling back to a disk read,
+    /// so the synthetic paths resolve to in-memory source without
+    /// any further plumbing.
+    fn build_module_cache(&self) -> KCLModuleCache {
+        let cache = KCLModuleCache::default();
+        if let Ok(mut cache_w) = cache.write() {
+            for vp in self.virtual_packages.values() {
+                for (path, source) in &vp.files {
+                    cache_w
+                        .source_code
+                        .insert(path.clone(), source.clone());
+                }
+            }
+        }
+        cache
+    }
 }
 
-/// Sentinel error type used by the step-3 stub [`EmbeddedReady::evaluate`]
-/// until step 4 lands the full implementation.
+/// Build the `ExecProgramArgs` shape the runner consumes, mapping
+/// `EvaluateArgs`' typed fields into the existing CLI-aligned arg
+/// schema.
+fn build_exec_args(args: &EvaluateArgs) -> ExecProgramArgs {
+    let mut exec_args = ExecProgramArgs {
+        work_dir: args
+            .work_dir
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
+        k_filename_list: vec![VIRTUAL_MAIN_FILENAME.to_string()],
+        k_code_list: vec![args.main_source.clone()],
+        overrides: args.overrides.clone(),
+        path_selector: args.path_selector.clone(),
+        ..Default::default()
+    };
+    exec_args.args = args
+        .external_args
+        .iter()
+        .map(|(name, value)| ast::Argument {
+            name: name.clone(),
+            value: value.clone(),
+        })
+        .collect();
+    exec_args.set_external_pkg_from_package_maps(
+        args.external_packages
+            .iter()
+            .map(|(name, path)| (name.clone(), path.to_string_lossy().to_string()))
+            .collect(),
+    );
+    exec_args
+}
+
+/// The non-`catch_unwind` body of [`EmbeddedReady::evaluate`]. Split
+/// out so the panic bridge sits cleanly at the call site without
+/// burying the happy-path flow inside an `AssertUnwindSafe(|| { ... })`.
+fn evaluate_inner(
+    sess: Arc<ParseSession>,
+    exec_args: ExecProgramArgs,
+    load_opts: LoadProgramOptions,
+    module_cache: KCLModuleCache,
+) -> Result<EvaluateOutcome, EvaluationError> {
+    // Stage 1: parse. load_program collects diagnostics on the
+    // session's Handler; surface them as EvaluationError::Parse if
+    // any errors were recorded.
+    let main_path = VIRTUAL_MAIN_FILENAME;
+    let parse_result = load_program(
+        sess.clone(),
+        &[main_path],
+        Some(load_opts),
+        Some(module_cache),
+    )
+    .map_err(|e| {
+        EvaluationError::Internal(Box::new(BridgedAnyhowError(e.to_string())))
+    })?;
+
+    let (parse_errors, _warnings) = sess.classification();
+    if !parse_errors.is_empty() {
+        return Err(EvaluationError::Parse(
+            parse_errors.into_iter().collect(),
+        ));
+    }
+    // load_program may also stash parse errors on parse_result.errors
+    // (separately from the session Handler). Surface both.
+    if !parse_result.errors.is_empty() {
+        return Err(EvaluationError::Parse(
+            parse_result.errors.into_iter().collect(),
+        ));
+    }
+
+    // Stage 2: sema (resolve). resolve_program writes diagnostics
+    // onto its scope.handler; check for errors before evaluation.
+    let mut program = parse_result.program;
+    let scope = resolve_program(&mut program);
+    let (resolve_errors, _resolve_warnings) = scope.handler.classification();
+    if !resolve_errors.is_empty() {
+        return Err(EvaluationError::Resolve(
+            resolve_errors.into_iter().collect(),
+        ));
+    }
+
+    // Stage 3: evaluation. FastRunner::run_to_value runs the program
+    // and catches runtime panics internally; runtime failures
+    // surface as a non-empty err_message on the result.
+    let runner = FastRunner::new(Some(RunnerOptions {
+        plugin_agent_ptr: exec_args.plugin_agent,
+    }));
+    let runner_result = runner.run_to_value(&program, &exec_args).map_err(|e| {
+        EvaluationError::Internal(Box::new(BridgedAnyhowError(e.to_string())))
+    })?;
+
+    let log_messages = split_log_messages(&runner_result.log_message);
+
+    if !runner_result.err_message.is_empty() {
+        // Phase 6a will replace this with direct Diagnostic
+        // propagation. For now, surface the err_message as a single
+        // best-effort Diagnostic in EvaluationError::Evaluate.
+        return Err(EvaluationError::Evaluate(vec![
+            diagnostic_from_runner_err(&runner_result.err_message),
+        ]));
+    }
+
+    Ok(EvaluateOutcome {
+        value: runner_result.value,
+        log_messages,
+    })
+}
+
+/// Split the runner's accumulated `log_message` string into individual
+/// entries. KCL's `print()` builtin appends each call's output
+/// followed by a newline; we split on `\n` and drop the trailing
+/// empty string.
+fn split_log_messages(buffer: &str) -> Vec<String> {
+    if buffer.is_empty() {
+        return Vec::new();
+    }
+    buffer
+        .split('\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_string())
+        .collect()
+}
+
+/// Construct a best-effort [`Diagnostic`] from the runner's
+/// `err_message`. Used in the runtime-failure path until Phase 6a
+/// wires structured propagation.
+fn diagnostic_from_runner_err(message: &str) -> Diagnostic {
+    use kcl_error::{DiagnosticId, Level, Message, Position, Style};
+    Diagnostic {
+        level: Level::Error,
+        messages: vec![Message {
+            range: (Position::dummy_pos(), Position::dummy_pos()),
+            style: Style::Line,
+            message: message.to_string(),
+            note: None,
+            suggested_replacement: None,
+        }],
+        code: Some(DiagnosticId::Error(
+            kcl_error::ErrorKind::EvaluationError,
+        )),
+    }
+}
+
+/// Wrapper that lets the `Internal` arm of [`EvaluationError`] carry
+/// an `anyhow::Error`'s message without entangling the public surface
+/// with the `anyhow` crate.
 #[derive(Debug, thiserror::Error)]
-#[error("kcl-embed: EmbeddedReady::evaluate is not yet wired through to the runner")]
-struct NotYetImplemented;
+#[error("{0}")]
+struct BridgedAnyhowError(String);
+
+/// Wrapper that lets the `Internal` arm of [`EvaluationError`] carry
+/// a panic payload's message string.
+#[derive(Debug, thiserror::Error)]
+#[error("evaluator panicked: {0}")]
+struct BridgedPanicError(String);
 
 #[cfg(test)]
 mod tests {
@@ -332,16 +571,29 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_is_a_step3_stub() {
-        // Lock the contract: step 3 ships the surface; step 4 wires
-        // evaluation. Until step 4 lands, evaluate returns Internal.
+    fn evaluate_inline_main_produces_structured_value() {
+        // End-to-end smoke: a main source with no imports evaluates
+        // and surfaces a structured ValueRef. The full
+        // import-from-registered-module flow is exercised by the
+        // integration tests in step 5.
         let ready = Embedded::new().build();
-        let outcome = ready.evaluate(EvaluateArgs::default());
-        match outcome {
-            Err(EvaluationError::Internal(_)) => { /* step-3 contract */ }
-            other => panic!(
-                "step-3 stub should return EvaluationError::Internal; got: {other:?}"
-            ),
-        }
+        let outcome = ready
+            .evaluate(EvaluateArgs {
+                main_source: "alice = {age = 18}".to_string(),
+                ..EvaluateArgs::default()
+            })
+            .expect("evaluate should succeed");
+        assert!(
+            outcome.value.is_dict(),
+            "top-level value should be a dict, got type={}",
+            outcome.value.type_str()
+        );
+        let alice = outcome
+            .value
+            .dict_get_value("alice")
+            .expect("alice should be in top-level dict");
+        assert!(alice.is_dict());
+        assert_eq!(alice.dict_get_value("age").unwrap().as_int(), 18);
+        assert!(outcome.log_messages.is_empty());
     }
 }

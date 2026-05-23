@@ -13,8 +13,10 @@ use kcl_query::apply_overrides;
 use kcl_sema::resolver::{
     Options, resolve_program, resolve_program_with_opts, scope::ProgramScope,
 };
-pub use runner::{ExecProgramArgs, ExecProgramResult, ExecProgramValueResult, MapErrorResult};
-use runner::{FastRunner, RunnerOptions};
+pub use runner::{
+    ExecProgramArgs, ExecProgramResult, ExecProgramValueResult, FastRunner, MapErrorResult,
+    RunnerOptions,
+};
 
 pub mod runner;
 
