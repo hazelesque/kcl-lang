@@ -84,3 +84,6 @@ _a.out_*.*
 
 # KCL mod lock file
 !.mod.lock
+
+# Test artefacts produced by cargo test in kcl-config's testdata
+crates/config/src/testdata/test_cache/.kcl/
