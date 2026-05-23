@@ -21,6 +21,7 @@ kcl-cli = { path = "crates/cli" }
 kcl-cmd = { path = "crates/cmd" }
 kcl-config = { path = "crates/config" }
 kcl-driver = { path = "crates/driver" }
+kcl-embed = { path = "crates/embed" }
 kcl-error = { path = "crates/error" }
 kcl-evaluator = { path = "crates/evaluator" }
 kcl-lexer = { path = "crates/lexer" }

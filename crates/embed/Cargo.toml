@@ -1,0 +1,27 @@
+[package]
+name = "kcl-embed"
+version.workspace = true
+edition.workspace = true
+description = "In-process Rust embedding API for KCL"
+
+# Strict lints per the fork's scm-infra style conventions (see plan
+# section "Style conventions for new crates"). Pre-existing crates are
+# left alone; new code in this crate does not regress that posture.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "deny"
+todo = "deny"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+kcl-ast.workspace = true
+kcl-error.workspace = true
+kcl-evaluator.workspace = true
+kcl-parser.workspace = true
+kcl-runner.workspace = true
+kcl-runtime.workspace = true
+kcl-sema.workspace = true
