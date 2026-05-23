@@ -164,7 +164,7 @@ impl<'ctx> Evaluator<'ctx> {
         let modules = self.program.get_modules_for_pkg(kcl_ast::MAIN_PKG);
         self.init_scope(kcl_ast::MAIN_PKG);
         self.compile_ast_modules(&modules);
-        Ok(self.plan_globals_to_string())
+        self.plan_globals_to_string()
     }
 
     /// Evaluate the program and return the structured result as a [`ValueRef`].
@@ -183,7 +183,7 @@ impl<'ctx> Evaluator<'ctx> {
         let modules = self.program.get_modules_for_pkg(kcl_ast::MAIN_PKG);
         self.init_scope(kcl_ast::MAIN_PKG);
         self.compile_ast_modules(&modules);
-        Ok(self.plan_globals_to_value())
+        self.plan_globals_to_value()
     }
 
     /// Evaluate the program with the function mode and return the JSON and YAML result,
@@ -215,21 +215,40 @@ impl<'ctx> Evaluator<'ctx> {
     /// structured consumers receive the dict-merged value tree, not a
     /// yaml-stream re-parse. That side-channel is being cleaned up in
     /// Phase 2.5 of the structured-output refactor.
-    pub(crate) fn plan_globals_to_value(&self) -> ValueRef {
+    pub(crate) fn plan_globals_to_value(&self) -> Result<ValueRef> {
         let current_pkgpath = self.current_pkgpath();
         let pkg_scopes = &self.pkg_scopes.borrow();
-        let scopes = pkg_scopes
-            .get(&current_pkgpath)
-            .unwrap_or_else(|| panic!("pkgpath {} is not found", current_pkgpath));
-        // The global scope.
-        let scope = scopes.last().expect(eval_error::INTERNAL_ERROR_MSG);
+        // Phase 6a: this used to `panic!("pkgpath {} is not found", ...)`
+        // on internal-state inconsistency; it now propagates as an
+        // anyhow::Error so the runner's `catch_unwind` bridge becomes
+        // defence in depth rather than the primary mechanism for this
+        // failure mode. Reached only on evaluator-internal bugs
+        // (init_scope was not called for the current pkgpath) — never
+        // by user-controlled input — but Result-typed propagation
+        // gives the runner a chance to surface a structured
+        // diagnostic instead of terminating.
+        let scopes = pkg_scopes.get(&current_pkgpath).ok_or_else(|| {
+            anyhow::anyhow!(
+                "internal: pkgpath {} has no resolved scope (init_scope was not called for it)",
+                current_pkgpath
+            )
+        })?;
+        // The global scope; same internal-state invariant — scopes
+        // for an initialised pkgpath are non-empty by construction.
+        let scope = scopes.last().ok_or_else(|| {
+            anyhow::anyhow!(
+                "internal: pkgpath {} resolved to an empty scope stack ({})",
+                current_pkgpath,
+                eval_error::INTERNAL_ERROR_MSG
+            )
+        })?;
         let scalars = &scope.scalars;
         let globals = &scope.variables;
         // Construct a plan object.
         let mut global_dict = self.dict_value();
         // Empty result.
         if scalars.is_empty() && globals.is_empty() {
-            return global_dict;
+            return Ok(global_dict);
         }
         // Deal scalars
         for scalar in scalars.iter() {
@@ -246,16 +265,16 @@ impl<'ctx> Evaluator<'ctx> {
             self.dict_insert_merge_value(&mut value_dict, name.as_str(), value);
             self.dict_insert_merge_value(&mut global_dict, SCALAR_KEY, &value_dict);
         }
-        match global_dict.dict_get_value(SCALAR_KEY) {
+        Ok(match global_dict.dict_get_value(SCALAR_KEY) {
             Some(value) => value,
             None => self.dict_value(),
-        }
+        })
     }
 
     /// Plan globals to a planed json and yaml string.
-    pub(crate) fn plan_globals_to_string(&self) -> (String, String) {
-        let value = self.plan_globals_to_value();
-        self.plan_value(&value)
+    pub(crate) fn plan_globals_to_string(&self) -> Result<(String, String)> {
+        let value = self.plan_globals_to_value()?;
+        Ok(self.plan_value(&value))
     }
 
     /// Get evaluator default ok result
