@@ -110,14 +110,20 @@ pub struct ExecProgramResult {
 /// cannot cross the protobuf RPC boundary that Go and other host languages
 /// use. Per the plan's D2, the protobuf wire format stays string-only; Rust
 /// consumers reach for this struct via [`FastRunner::run_to_value`] /
-/// [`crate::execute_to_value`] / `KclvmServiceImpl::exec_program_to_value`.
+/// [`crate::execute_to_value`] / `kcl_api::service::service_impl::KclServiceImpl::exec_program_to_value`.
 ///
 /// `value` is the dict-merged global scope (see
-/// `kcl_evaluator::Evaluator::plan_globals_to_value`). On evaluation
-/// failure it is `ValueRef::undefined()` and `err_message` describes the
-/// failure — Phase 6a will replace this string-shaped error path with a
-/// structured `EvaluationError` type; for now, mirroring `ExecProgramResult`
-/// keeps the runner layer behaviour-preserving.
+/// `kcl_evaluator::Evaluator::plan_globals_to_value`).
+///
+/// **On `args.compile_only` mode or evaluation failure, `value` is
+/// `ValueRef::undefined()`** and `err_message` describes the failure (or
+/// is empty for compile-only). Consumers MUST check `err_message` (current)
+/// or the future `EvaluationError` variant (Phase 6a) before walking the
+/// tree — `ValueRef::undefined` is structurally not a dict and any
+/// downstream `TryFrom<&ValueRef>` will fail. Phase 6a will replace this
+/// string-shaped error path with a structured `EvaluationError` type; for
+/// now, mirroring `ExecProgramResult` keeps the runner layer
+/// behaviour-preserving.
 #[derive(Debug, Default, Clone)]
 pub struct ExecProgramValueResult {
     pub value: ValueRef,

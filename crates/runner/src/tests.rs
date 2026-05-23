@@ -574,6 +574,42 @@ mod structured_output_tests {
         assert_eq!(val_disks.as_list_ref().values.len(), 2);
     }
 
+    /// Failure contract for runtime errors: a program that passes sema but
+    /// fails at evaluation (here, a check-block violation) returns
+    /// `Ok` with `err_message` non-empty and `value = ValueRef::undefined()`.
+    /// Locks down the runner-level runtime-failure shape before Phase 6a
+    /// swaps it for structured EvaluationError.
+    ///
+    /// NOTE: sema-level errors (type mismatches, undefined identifiers)
+    /// return `Result::Err` from `exec_program_to_value` rather than this
+    /// `Ok-with-err_message-and-undefined-value` shape. The two error
+    /// surfaces mirror the existing string path. Phase 6a unifies them
+    /// behind `EvaluationError::{Parse, Resolve, Evaluate, Internal}`.
+    #[test]
+    fn test_structured_value_failure_returns_undefined_value() {
+        let sess = Arc::new(ParseSession::default());
+        let args = ExecProgramArgs {
+            k_filename_list: vec!["test.k".to_string()],
+            // Passes sema (memory_mb is int), fails at evaluation via the
+            // check-block predicate.
+            k_code_list: vec![
+                "schema Vm:\n    memory_mb: int\n    check:\n        memory_mb >= 1024, \"memory_mb must be at least 1024\"\n\nvm = Vm {memory_mb = 16}".to_string(),
+            ],
+            ..Default::default()
+        };
+        let result = exec_program_to_value(sess, &args)
+            .expect("runtime check-block failures return Ok-with-err_message, not Err");
+        assert!(
+            !result.err_message.is_empty(),
+            "expected err_message to describe the check-block violation, got empty"
+        );
+        assert!(
+            result.value.is_undefined(),
+            "expected ValueRef::undefined() on runtime failure, got: type={}",
+            result.value.type_str()
+        );
+    }
+
     /// The structured-output path returns the dict-merged global scope
     /// directly. An empty program should produce an empty dict, mirroring
     /// what the string path emits (`{}` / empty YAML).
