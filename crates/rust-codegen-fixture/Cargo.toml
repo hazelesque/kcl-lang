@@ -19,3 +19,8 @@ kcl-rust-codegen.workspace = true
 
 [dev-dependencies]
 kcl-embed.workspace = true
+# Used by the build-time-drift test in tests/end_to_end.rs to
+# directly invoke codegen and assert the generated source uses
+# schema field names verbatim. Build.rs uses the build-deps copy;
+# this entry exposes the same crate to tests/.
+kcl-rust-codegen.workspace = true

@@ -210,6 +210,24 @@ fn emit_struct(out: &mut String, schema: &SchemaIR) {
         "/// Generated from `{}` (line {})\n",
         schema.source_file, schema.source_line
     ));
+    // PartialEq on f64 is NaN-aware: `f64::NAN != f64::NAN`. For
+    // schemas with float fields this is the standard Rust behaviour,
+    // but worth flagging in the generated rustdoc so consumers
+    // aren't surprised when two `Vm`s with NaN field values compare
+    // unequal. (Future evolution: conditional derive or custom impl
+    // — out of MVP scope; tracked under Phase 4B.)
+    let has_float = schema.fields.iter().any(|f| f.kind.contains_float());
+    if has_float {
+        out.push_str(
+            "/// **Note:** this type contains `f64` field(s); the derived\n",
+        );
+        out.push_str(
+            "/// `PartialEq` is NaN-aware (`f64::NAN != f64::NAN`). Two\n",
+        );
+        out.push_str(
+            "/// instances with NaN field values will compare unequal.\n",
+        );
+    }
     out.push_str("#[derive(Debug, Clone, PartialEq)]\n");
     out.push_str(&format!("pub struct {} {{\n", schema.name));
     for field in &schema.fields {

@@ -239,4 +239,83 @@ mod tests {
             other => panic!("expected Parse/Resolve, got: {other:?}"),
         }
     }
+
+    /// Schema inheritance is deferred from Phase 4 MVP (D9). Codegen
+    /// should refuse with a specific UnsupportedFeature error that
+    /// names "schema_inheritance" — not silently produce wrong code.
+    #[test]
+    fn schema_inheritance_errors_with_actionable_feature_name() {
+        let src = concat!(
+            "schema Parent:\n",
+            "    base_field: int\n",
+            "\n",
+            "schema Child(Parent):\n",
+            "    child_field: str\n",
+        );
+        let err = generate_to_string(src).expect_err("should fail");
+        match err {
+            CodegenError::UnsupportedFeature { feature, location } => {
+                assert_eq!(feature, "schema_inheritance");
+                assert!(
+                    location.contains("Child"),
+                    "location should name the offending schema; got: {location}"
+                );
+            }
+            other => panic!("expected UnsupportedFeature, got: {other:?}"),
+        }
+    }
+
+    /// Non-string-literal unions (e.g. `int | str`) are deferred
+    /// pending the tagged_enum annotation work. Codegen should
+    /// refuse with a specific message that points at the workaround,
+    /// not produce a broken `()` type.
+    #[test]
+    fn non_string_literal_union_errors_with_actionable_message() {
+        let src = concat!(
+            "schema Spec:\n",
+            "    quota: int | str\n",
+        );
+        let err = generate_to_string(src).expect_err("should fail");
+        match err {
+            CodegenError::UnsupportedFeature { feature, location } => {
+                assert_eq!(feature, "field_kind");
+                assert!(
+                    location.contains("union")
+                        || location.contains("Union")
+                        || location.contains("tagged_enum"),
+                    "message should point at the workaround; got: {location}"
+                );
+            }
+            other => panic!("expected UnsupportedFeature, got: {other:?}"),
+        }
+    }
+
+    /// Lifted enum name collision: a schema literally named the same
+    /// as a discriminator's PascalCase concat would emit two `pub`
+    /// items with the same identifier. Codegen detects this and
+    /// errors before emission rather than producing source that
+    /// fails to compile in confusing ways.
+    #[test]
+    fn lifted_enum_name_collision_is_detected() {
+        let src = concat!(
+            // A schema literally named VmState — also the
+            // PascalCase concat of "Vm" + "state" — would collide
+            // with the enum lifted from Vm.state's union below.
+            "schema VmState:\n",
+            "    label: str\n",
+            "\n",
+            "schema Vm:\n",
+            "    state: \"running\" | \"stopped\"\n",
+        );
+        let err = generate_to_string(src).expect_err("should fail");
+        match err {
+            CodegenError::Internal(msg) => {
+                assert!(
+                    msg.contains("VmState") && msg.contains("collide"),
+                    "expected collision diagnostic; got: {msg}"
+                );
+            }
+            other => panic!("expected Internal/collision, got: {other:?}"),
+        }
+    }
 }

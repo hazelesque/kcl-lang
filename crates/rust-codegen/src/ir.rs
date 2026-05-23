@@ -154,6 +154,21 @@ impl FieldKind {
             other => other.to_rust_type(),
         }
     }
+
+    /// Recursively check whether this kind transitively contains a
+    /// [`FieldKind::Float`]. Used by the emitter to surface the
+    /// NaN-aware-PartialEq smell on generated structs that derive
+    /// `PartialEq` and have an `f64` field. (Phase 4 MVP keeps the
+    /// blanket derive; future work may switch to per-schema
+    /// conditional derives or a custom-impl shape.)
+    pub fn contains_float(&self) -> bool {
+        match self {
+            FieldKind::Float => true,
+            FieldKind::List(inner) => inner.contains_float(),
+            FieldKind::Dict(k, v) => k.contains_float() || v.contains_float(),
+            _ => false,
+        }
+    }
 }
 
 /// Walk the resolved program's main package, extract every schema
@@ -187,15 +202,53 @@ pub(crate) fn extract_module(
         if ty.is_mixin || ty.is_protocol {
             continue;
         }
-        let schema_ir = schema_to_ir(name.clone(), &ty, &mut module)?;
+        let source_line = obj.start.line;
+        let schema_ir = schema_to_ir(name.clone(), &ty, source_line, &mut module)?;
         module.schemas.push(schema_ir);
     }
+
+    detect_lifted_enum_collisions(&module)?;
+
     Ok(module)
+}
+
+/// A lifted enum's Rust name is `<SchemaName><FieldName>` in
+/// PascalCase. If the user happens to define a schema literally
+/// named (say) `VmState` alongside a `Vm.state` discriminator, the
+/// emitted file would contain two `pub` items called `VmState` and
+/// fail to compile. Detect that early with a clear error rather
+/// than letting rustc surface a confused message about duplicate
+/// definitions in generated code.
+fn detect_lifted_enum_collisions(module: &ModuleIR) -> Result<(), CodegenError> {
+    use std::collections::HashSet;
+    let schema_names: HashSet<&str> = module.schemas.iter().map(|s| s.name.as_str()).collect();
+    for e in &module.enums {
+        if schema_names.contains(e.rust_name.as_str()) {
+            return Err(CodegenError::Internal(format!(
+                "lifted enum `{}` (from {}) collides with a schema of the same name; \
+                 rename the schema or the discriminator field to disambiguate",
+                e.rust_name, e.origin,
+            )));
+        }
+    }
+    let mut enum_names: HashSet<&str> = HashSet::new();
+    for e in &module.enums {
+        if !enum_names.insert(e.rust_name.as_str()) {
+            return Err(CodegenError::Internal(format!(
+                "lifted enum name `{}` is duplicated (origins include {}); \
+                 two fields with the same parent + field name pair produced a \
+                 collision",
+                e.rust_name, e.origin,
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn schema_to_ir(
     name: String,
     ty: &SchemaType,
+    source_line: u64,
     module: &mut ModuleIR,
 ) -> Result<SchemaIR, CodegenError> {
     if ty.base.is_some() {
@@ -231,7 +284,7 @@ fn schema_to_ir(
     Ok(SchemaIR {
         name,
         source_file: ty.filename.clone(),
-        source_line: 0,
+        source_line,
         fields,
         doc: ty.doc.clone(),
     })

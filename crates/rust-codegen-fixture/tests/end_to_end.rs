@@ -10,6 +10,7 @@
 
 use kcl_embed::{Embedded, EvaluateArgs};
 use kcl_rust_codegen_fixture::{Disk, DiskStorageClass, Vm, VmState};
+use kcl_runtime::ValueRef;
 
 const VM_PROGRAM: &str = include_str!("../schemas.k");
 
@@ -126,6 +127,113 @@ fn defaults_flow_through_codegen() {
     assert_eq!(vm.cores, 2, "default 2 should flow through");
     assert_eq!(vm.notes, None);
     assert!(vm.disks.is_empty());
+}
+
+/// Runtime drift detection: the generated `TryFrom<&ValueRef>`
+/// returns `Err` (rather than panicking or silently producing
+/// garbage) when the input ValueRef lacks a required field. This is
+/// the D4 seatbelt's load-bearing property — in a well-formed
+/// deployment the VM would have rejected the input upstream, but if
+/// codegen ever drifts from the schema the VM was given, this is the
+/// safety net that surfaces the mismatch instead of UB.
+///
+/// Reviewer 1 + Reviewer 2 both flagged the absence of this test in
+/// the Phase 4 MVP; landing it here closes the quality gap.
+#[test]
+fn missing_required_field_surfaces_as_try_from_err() {
+    // Construct a Disk ValueRef directly via kcl-runtime, skipping
+    // KCL evaluation (so we can build a ValueRef that the VM would
+    // never produce — exactly the codegen-drift scenario). Omit the
+    // required `size_gb` field.
+    let label = ValueRef::str("data");
+    let malformed = ValueRef::dict(Some(&[("label", &label)]));
+
+    let result = Disk::try_from(&malformed);
+    let err = result.expect_err("missing required field should surface as Err");
+    assert!(
+        err.contains("Disk.size_gb") && err.contains("missing"),
+        "Err should name the missing field; got: {err:?}"
+    );
+}
+
+/// Runtime drift detection (type mismatch case): a field's
+/// runtime-presented type doesn't match the schema's declared type.
+/// The seatbelt surfaces this as an `Err` whose message names the
+/// expected and actual types.
+#[test]
+fn type_mismatch_on_field_surfaces_as_try_from_err() {
+    // size_gb is `int` in the schema; provide a str instead.
+    let bogus_size = ValueRef::str("not-an-int");
+    let malformed = ValueRef::dict(Some(&[("size_gb", &bogus_size)]));
+
+    let result = Disk::try_from(&malformed);
+    let err = result.expect_err("type-mismatched field should surface as Err");
+    assert!(
+        err.contains("Disk.size_gb") && err.contains("expected int"),
+        "Err should name the field and the expected type; got: {err:?}"
+    );
+}
+
+/// Runtime drift detection (enum case): a string-literal-union value
+/// not in the declared set surfaces as `Err`, not as a silent
+/// default or a wrongly-mapped variant.
+#[test]
+fn unexpected_str_enum_literal_surfaces_as_try_from_err() {
+    // VmState is "running" | "stopped" | "paused"; "exploded"
+    // isn't in the set.
+    let bogus_state = ValueRef::str("exploded");
+    let result = VmState::try_from(&bogus_state);
+    let err = result.expect_err("unexpected literal should surface as Err");
+    assert!(
+        err.contains("exploded")
+            && (err.contains("running") || err.contains("expected one of")),
+        "Err should mention both the unexpected literal and the allowed set; got: {err:?}"
+    );
+}
+
+/// Build-time drift detection (documented; no automated test):
+///
+/// The generated code references each schema field by name in two
+/// places: the `pub <field>: <type>` struct declaration and the
+/// `_kcl_codegen_helpers::require(v, "<field>", ...)` call in the
+/// `TryFrom` impl. A consumer crate that uses `vm.foo` will fail to
+/// compile if `foo` is renamed in the source schema — Rust's type
+/// system is the catcher, not a runtime check.
+///
+/// To verify this property manually:
+/// 1. Rename a field in `schemas.k` (e.g. `name` → `hostname`).
+/// 2. `cargo build -p kcl-rust-codegen-fixture` — succeeds (build.rs
+///    regenerates the types).
+/// 3. `cargo test -p kcl-rust-codegen-fixture` — fails to compile
+///    because the tests still reference `vm.name`.
+/// 4. The compile error names the field and the line, just like any
+///    other Rust rename refactor.
+///
+/// (Encoded as a comment-doc rather than a `#[test]` because making
+/// "the consumer fails to compile" automated requires either
+/// `trybuild` scaffolding or a subprocess `cargo build` invocation —
+/// both heavy. The property is structural: if the generated source
+/// uses schema field names verbatim, rust catches the drift.)
+#[test]
+fn generated_source_uses_schema_field_names_verbatim() {
+    // Codegen test the property at the generated-source level: if
+    // the source `Vm.name` were renamed, the generated source would
+    // no longer contain the literal "pub name:" — and downstream
+    // code referencing `vm.name` would fail to compile.
+    let src = include_str!("../schemas.k");
+    let generated = kcl_rust_codegen::generate_to_string(src).expect("codegen");
+    assert!(
+        generated.contains("pub name: String,"),
+        "generated source should declare Vm.name with the source field name verbatim"
+    );
+    assert!(
+        generated.contains("_kcl_codegen_helpers::require(v, \"name\", \"Vm\""),
+        "generated source should read Vm.name by the source field name verbatim"
+    );
+    assert!(
+        generated.contains("pub size_gb: i64,"),
+        "generated source should declare Disk.size_gb with the source field name verbatim"
+    );
 }
 
 /// Sanity-check that the generated Disk type also stands on its own:
