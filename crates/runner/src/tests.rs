@@ -857,6 +857,86 @@ mod structured_output_tests {
         );
     }
 
+    /// Phase 4A D10 empirical probe: dump what a KCL mixin produces in
+    /// the resulting `ValueRef`. The codegen strategy depends on what
+    /// the runtime surfaces — does the mixin appear as a distinct
+    /// concept on the schema instance, or are its fields silently
+    /// inlined into the consuming schema's value tree?
+    ///
+    /// The test prints + asserts a specific shape; if the assertion
+    /// fails because the runtime produces something different, the
+    /// failure message records the actual shape so the codegen
+    /// decision is informed by real data, not a hypothesis.
+    #[test]
+    fn test_structured_value_mixin_probe() {
+        let sess = Arc::new(ParseSession::default());
+        let args = ExecProgramArgs {
+            k_filename_list: vec!["test.k".to_string()],
+            k_code_list: vec![concat!(
+                "mixin AuditLogMixin:\n",
+                "    audit_id: str\n",
+                "    created_by: str = \"system\"\n",
+                "\n",
+                "schema Foo:\n",
+                "    mixin [AuditLogMixin]\n",
+                "    name: str\n",
+                "\n",
+                "foo = Foo {audit_id = \"abc123\", name = \"alpha\"}\n",
+            )
+            .to_string()],
+            ..Default::default()
+        };
+        let result = exec_program_to_value(sess, &args).expect("evaluation failed");
+        assert!(
+            result.err_message.is_empty(),
+            "unexpected err_message: {}",
+            result.err_message
+        );
+
+        let foo = result
+            .value
+            .dict_get_value("foo")
+            .expect("foo should be at top level");
+        assert!(foo.is_schema(), "foo should be a schema instance");
+        let foo_schema = foo.as_schema();
+
+        // What's the schema name? Whatever the runtime calls it.
+        // If it's "Foo", mixins are flattened. If something else
+        // surfaces (e.g. "Foo+AuditLogMixin"), the encoding is more
+        // complex and codegen needs to be aware.
+        eprintln!("schema name reported by runtime: {:?}", foo_schema.name);
+        assert_eq!(
+            foo_schema.name, "Foo",
+            "D10 finding: schema name is something other than the consuming schema's name"
+        );
+
+        // All three fields are reachable via dict_get_value on the
+        // schema instance — the mixin's fields appear inline.
+        assert_eq!(
+            foo.dict_get_value("audit_id").unwrap().as_str(),
+            "abc123",
+            "D10 finding: mixin's audit_id field not inlined on the consuming schema"
+        );
+        assert_eq!(
+            foo.dict_get_value("created_by").unwrap().as_str(),
+            "system",
+            "D10 finding: mixin's default value not flowed through"
+        );
+        assert_eq!(foo.dict_get_value("name").unwrap().as_str(), "alpha");
+
+        // Document the empirical answer: KCL mixins are *inlined*
+        // into the consuming schema's instance. The mixin name does
+        // not appear in the result tree as a distinct concept. For
+        // codegen this means: a schema using `mixin [AuditLogMixin]`
+        // produces a Rust struct with all the mixed-in fields
+        // appearing alongside the schema's own fields, exactly as
+        // if they had been declared inline. The mixin itself does
+        // not need a separate generated type for the result-tree
+        // path. (A separate `mixin AuditLogMixin` type might still be
+        // useful for type-system roundtripping — Phase 4B work if a
+        // consumer needs it.)
+    }
+
     /// Helper for `test_structured_value_tilley_shaped_fixture`. Asserts
     /// that an optional schema field declared `field?: T` and not set on
     /// the instance surfaces in the `ValueRef` tree as `Value::undefined`
