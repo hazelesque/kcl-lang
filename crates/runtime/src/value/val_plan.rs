@@ -26,6 +26,32 @@ pub struct PlanOptions {
     pub sep: Option<String>,
 }
 
+/// Borrow the head of `results` mutably.
+///
+/// Internal invariant: every caller of [`filter_results`] pushes a fresh
+/// empty dict into `results` before the first call into the per-key
+/// branches below — so `results[0]` is always present at the time we
+/// reach the insertion sites. Centralised through this helper so the
+/// invariant lives in one place rather than being implicit at five
+/// different `.unwrap()` sites that would each panic with the same
+/// generic "called Option::unwrap() on a None value" message.
+///
+/// Phase 6a rationale: the previous `.unwrap()` sites here are not
+/// reached by user-controlled input — they fire only on a downstream
+/// invariant violation caused by an evaluator-side refactor. The
+/// expect message names that contract so a future ripgrep for the
+/// failure mode lands at the site responsible.
+#[inline]
+fn results_head_mut(results: &mut [ValueRef]) -> &mut ValueRef {
+    results.first_mut().expect(
+        "kcl-runtime invariant: filter_results requires its `results` Vec to be \
+         pre-populated by the caller (an empty dict pushed before the per-key loop). \
+         Reaching this expect means an evaluator-side refactor broke that ordering — \
+         every call into the per-key branches below relies on results[0] being a \
+         dict already.",
+    )
+}
+
 /// Filter list or config results with context options.
 fn filter_results(ctx: &Context, key_values: &ValueRef) -> Vec<ValueRef> {
     let mut results: Vec<ValueRef> = vec![];
@@ -90,7 +116,7 @@ fn filter_results(ctx: &Context, key_values: &ValueRef) -> Vec<ValueRef> {
                 let filtered = handle_schema(ctx, value);
                 if !filtered.is_empty() {
                     // else put it as the value of the key of results
-                    let result = results.get_mut(0).unwrap();
+                    let result = results_head_mut(&mut results);
                     result.dict_update_key_value(key.as_str(), filtered[0].clone());
                     // if the value has derived 'STANDALONE' instances, extend them
                     if filtered.len() > 1 {
@@ -102,7 +128,7 @@ fn filter_results(ctx: &Context, key_values: &ValueRef) -> Vec<ValueRef> {
             } else if value.is_dict() {
                 let filtered = filter_results(ctx, value);
                 if !results.is_empty() {
-                    let result = results.get_mut(0).unwrap();
+                    let result = results_head_mut(&mut results);
                     if !filtered.is_empty() {
                         result.dict_update_key_value(key.as_str(), filtered[0].clone());
                     }
@@ -154,18 +180,18 @@ fn filter_results(ctx: &Context, key_values: &ValueRef) -> Vec<ValueRef> {
                 let value = &value.as_list_ref().values;
                 // Plan empty list to values.
                 if value.is_empty() && !ctx.plan_opts.disable_empty_list {
-                    let result = results.get_mut(0).unwrap();
+                    let result = results_head_mut(&mut results);
                     result.dict_update_key_value(key.as_str(), ValueRef::list(None));
                 }
                 if schema_in_list_count < value.len() {
-                    let result = results.get_mut(0).unwrap();
+                    let result = results_head_mut(&mut results);
                     let filtered_list: Vec<&ValueRef> = filtered_list.iter().collect();
                     let filtered_list = filtered_list.as_slice();
                     let filtered_list = ValueRef::list(Some(filtered_list));
                     result.dict_update_key_value(key.as_str(), filtered_list);
                 }
             } else {
-                let result = results.get_mut(0).unwrap();
+                let result = results_head_mut(&mut results);
                 result.dict_update_key_value(key.as_str(), value.clone());
             }
         }
