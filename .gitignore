@@ -87,3 +87,7 @@ _a.out_*.*
 
 # Test artefacts produced by cargo test in kcl-config's testdata
 crates/config/src/testdata/test_cache/.kcl/
+
+# Session transcripts exported by /export from the assistant CLI;
+# the date-prefixed pattern matches the assistant's filename shape.
+/20[0-9][0-9]-*.txt

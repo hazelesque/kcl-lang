@@ -304,8 +304,6 @@ fn evaluation_emits_expected_phase_spans() {
         })
         .clone();
 
-    let observed_before = observed.lock().unwrap().len();
-
     let mut embedded = Embedded::new();
     embedded
         .register_module(
@@ -323,10 +321,11 @@ fn evaluation_emits_expected_phase_spans() {
         .expect("evaluate");
 
     let snapshot = observed.lock().unwrap().clone();
-    // Either look at just our window OR the full accumulated log;
-    // either way the four span names must be present. Using the full
-    // log is more tolerant of concurrent test span ordering.
-    let _ = observed_before; // window unused; full snapshot is sufficient
+    // The recorder accumulates spans from every test in this binary
+    // (it's a process-wide subscriber installed once via OnceLock).
+    // Asserting *presence* in the full snapshot is sufficient — every
+    // evaluate() call exercises the same four spans, so concurrent
+    // tests can only add more entries, never remove ours.
     for required in &[
         "kcl_embedded_evaluate",
         "kcl_parse",
