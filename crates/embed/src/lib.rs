@@ -47,6 +47,7 @@ use kcl_ast::ast;
 use kcl_parser::{KCLModuleCache, LoadProgramOptions, ParseSession, VirtualPackage, load_program};
 use kcl_runner::{ExecProgramArgs, FastRunner, RunnerOptions};
 use kcl_runtime::ValueRef;
+use tracing::info_span;
 use kcl_sema::resolver::resolve_program;
 
 /// The diagnostic type used throughout this crate's error surface.
@@ -300,6 +301,19 @@ impl EmbeddedReady {
         &self,
         args: EvaluateArgs,
     ) -> Result<EvaluateOutcome, EvaluationError> {
+        // Phase 6b: once-per-evaluation span at the public API
+        // boundary. registered_module_count is recorded as a span
+        // field so a subscriber can correlate evaluations against
+        // the size of the in-memory module registry without
+        // re-deriving it. Nested phase spans (parse/resolve/evaluate)
+        // attach to this one via the parent-child span tree.
+        let _span = info_span!(
+            "kcl_embedded_evaluate",
+            registered_module_count = self.virtual_packages.len(),
+            external_pkg_count = args.external_packages.len(),
+        )
+        .entered();
+
         let exec_args = build_exec_args(&args);
         let load_opts = self.build_load_options(&args);
         let module_cache = self.build_module_cache();
@@ -414,15 +428,18 @@ fn evaluate_inner(
     // session's Handler; surface them as EvaluationError::Parse if
     // any errors were recorded.
     let main_path = VIRTUAL_MAIN_FILENAME;
-    let parse_result = load_program(
-        sess.clone(),
-        &[main_path],
-        Some(load_opts),
-        Some(module_cache),
-    )
-    .map_err(|e| {
-        EvaluationError::Internal(Box::new(BridgedAnyhowError(e.to_string())))
-    })?;
+    let parse_result = {
+        let _parse = info_span!("kcl_parse").entered();
+        load_program(
+            sess.clone(),
+            &[main_path],
+            Some(load_opts),
+            Some(module_cache),
+        )
+        .map_err(|e| {
+            EvaluationError::Internal(Box::new(BridgedAnyhowError(e.to_string())))
+        })?
+    };
 
     let (parse_errors, _warnings) = sess.classification();
     if !parse_errors.is_empty() {
@@ -441,7 +458,10 @@ fn evaluate_inner(
     // Stage 2: sema (resolve). resolve_program writes diagnostics
     // onto its scope.handler; check for errors before evaluation.
     let mut program = parse_result.program;
-    let scope = resolve_program(&mut program);
+    let scope = {
+        let _resolve = info_span!("kcl_resolve").entered();
+        resolve_program(&mut program)
+    };
     let (resolve_errors, _resolve_warnings) = scope.handler.classification();
     if !resolve_errors.is_empty() {
         return Err(EvaluationError::Resolve(
@@ -452,6 +472,7 @@ fn evaluate_inner(
     // Stage 3: evaluation. FastRunner::run_to_value runs the program
     // and catches runtime panics internally; runtime failures
     // surface as a non-empty err_message on the result.
+    let _eval = info_span!("kcl_evaluate").entered();
     let runner = FastRunner::new(Some(RunnerOptions {
         plugin_agent_ptr: exec_args.plugin_agent,
     }));

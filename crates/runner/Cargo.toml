@@ -17,6 +17,7 @@ tempfile = "3.5.0"
 anyhow = "1.0"
 once_cell = "1.10"
 uuid = "1.7.0"
+tracing.workspace = true
 compiler_base_session.workspace = true
 compiler_base_macros.workspace = true
 

@@ -20,6 +20,8 @@ pub use runner::{
 
 pub mod runner;
 
+use tracing::info_span;
+
 #[cfg(test)]
 pub mod tests;
 
@@ -45,7 +47,16 @@ pub mod tests;
 /// let result = exec_program(sess, &args).unwrap();
 /// ```
 pub fn exec_program(sess: ParseSessionRef, args: &ExecProgramArgs) -> Result<ExecProgramResult> {
-    // parse args from json string
+    // Top-level once-per-evaluation span. Nested spans inside (parse,
+    // resolve, evaluate) attach to this one so a subscriber sees the
+    // full evaluation as a tree. file_count is the only field cheap
+    // enough to compute here; main file path is recorded on the parse
+    // sub-span where it belongs structurally.
+    let _span = info_span!(
+        "kcl_exec_program",
+        file_count = args.k_filename_list.len(),
+    )
+    .entered();
     let opts = args.get_load_program_options();
     let kcl_paths_str = args
         .k_filename_list
@@ -53,13 +64,16 @@ pub fn exec_program(sess: ParseSessionRef, args: &ExecProgramArgs) -> Result<Exe
         .map(|s| s.as_str())
         .collect::<Vec<&str>>();
     let module_cache = KCLModuleCache::default();
-    let mut program = load_program(
-        sess.clone(),
-        kcl_paths_str.as_slice(),
-        Some(opts),
-        Some(module_cache),
-    )?
-    .program;
+    let mut program = {
+        let _parse = info_span!("kcl_parse").entered();
+        load_program(
+            sess.clone(),
+            kcl_paths_str.as_slice(),
+            Some(opts),
+            Some(module_cache),
+        )?
+        .program
+    };
     apply_overrides(
         &mut program,
         &args.overrides,
@@ -102,19 +116,21 @@ pub fn execute(
 ) -> Result<ExecProgramResult> {
     // If the user only wants to compile the kcl program, the following code will only resolve ast.
     if args.compile_only {
+        let _resolve = info_span!("kcl_resolve", compile_only = true).entered();
         let resolve_opts = Options {
             merge_program: false,
             ..Default::default()
         };
-        // Resolve ast
         let scope = resolve_program_with_opts(&mut program, resolve_opts, None);
         emit_compile_diag_to_string(sess, &scope, args.compile_only)?;
         return Ok(ExecProgramResult::default());
     }
-    // Resolve ast
-    let scope = resolve_program(&mut program);
-    // Emit parse and resolve errors if exists.
+    let scope = {
+        let _resolve = info_span!("kcl_resolve").entered();
+        resolve_program(&mut program)
+    };
     emit_compile_diag_to_string(sess, &scope, false)?;
+    let _eval = info_span!("kcl_evaluate").entered();
     FastRunner::new(Some(RunnerOptions {
         plugin_agent_ptr: args.plugin_agent,
     }))
@@ -136,6 +152,11 @@ pub fn exec_program_to_value(
     sess: ParseSessionRef,
     args: &ExecProgramArgs,
 ) -> Result<ExecProgramValueResult> {
+    let _span = info_span!(
+        "kcl_exec_program_to_value",
+        file_count = args.k_filename_list.len(),
+    )
+    .entered();
     let opts = args.get_load_program_options();
     let kcl_paths_str = args
         .k_filename_list
@@ -143,13 +164,16 @@ pub fn exec_program_to_value(
         .map(|s| s.as_str())
         .collect::<Vec<&str>>();
     let module_cache = KCLModuleCache::default();
-    let mut program = load_program(
-        sess.clone(),
-        kcl_paths_str.as_slice(),
-        Some(opts),
-        Some(module_cache),
-    )?
-    .program;
+    let mut program = {
+        let _parse = info_span!("kcl_parse").entered();
+        load_program(
+            sess.clone(),
+            kcl_paths_str.as_slice(),
+            Some(opts),
+            Some(module_cache),
+        )?
+        .program
+    };
     apply_overrides(
         &mut program,
         &args.overrides,
@@ -175,6 +199,7 @@ pub fn execute_to_value(
     args: &ExecProgramArgs,
 ) -> Result<ExecProgramValueResult> {
     if args.compile_only {
+        let _resolve = info_span!("kcl_resolve", compile_only = true).entered();
         let resolve_opts = Options {
             merge_program: false,
             ..Default::default()
@@ -183,8 +208,12 @@ pub fn execute_to_value(
         emit_compile_diag_to_string(sess, &scope, args.compile_only)?;
         return Ok(ExecProgramValueResult::default());
     }
-    let scope = resolve_program(&mut program);
+    let scope = {
+        let _resolve = info_span!("kcl_resolve").entered();
+        resolve_program(&mut program)
+    };
     emit_compile_diag_to_string(sess, &scope, false)?;
+    let _eval = info_span!("kcl_evaluate").entered();
     FastRunner::new(Some(RunnerOptions {
         plugin_agent_ptr: args.plugin_agent,
     }))

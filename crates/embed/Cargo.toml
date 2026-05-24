@@ -18,6 +18,7 @@ todo = "deny"
 [dependencies]
 anyhow = "1"
 thiserror = "2"
+tracing.workspace = true
 kcl-ast.workspace = true
 kcl-error.workspace = true
 kcl-evaluator.workspace = true
