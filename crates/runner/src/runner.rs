@@ -167,16 +167,47 @@ impl MapErrorResult for Result<ExecProgramResult> {
 
 impl ExecProgramArgs {
     /// Deserialize an instance of type [ExecProgramArgs] from a string of JSON text.
-    pub fn from_json(s: &str) -> Self {
+    ///
+    /// Returns the typed Result; callers that can route a parse error
+    /// to the user (e.g. the C-ABI shim, the API service layer) should
+    /// reach for this rather than [`from_json`] so a malformed JSON
+    /// input becomes a surfaced error rather than a process panic.
+    pub fn try_from_json(s: &str) -> Result<Self, serde_json::Error> {
         if s.trim().is_empty() {
-            return Default::default();
+            return Ok(Default::default());
         }
-        serde_json::from_str::<ExecProgramArgs>(s).expect(s)
+        serde_json::from_str::<ExecProgramArgs>(s)
+    }
+
+    /// Deserialize from JSON, panicking on parse failure with the input
+    /// string in the panic message.
+    ///
+    /// Prefer [`try_from_json`] in new code — this wrapper exists for
+    /// backwards-compatibility with callers that don't currently have
+    /// an error-routing path. Phase 6a is in the process of migrating
+    /// those callers; once that's done, this method's body becomes a
+    /// `.expect()` whose firing reflects a programmer error rather
+    /// than a runtime-reachable input.
+    pub fn from_json(s: &str) -> Self {
+        Self::try_from_json(s).unwrap_or_else(|e| {
+            panic!("ExecProgramArgs::from_json: JSON parse failed: {e}; input was: {s:?}")
+        })
     }
 
     /// Serialize the [ExecProgramArgs] structure as a String of JSON.
+    ///
+    /// The `.expect()` here documents a structural invariant:
+    /// `ExecProgramArgs` is an owned struct of `String`s / `Vec`s /
+    /// `bool`s / numeric scalars; `serde_json` cannot fail to serialise
+    /// it short of allocator failure. The expect message surfaces the
+    /// invariant if that ever changes.
     pub fn to_json(&self) -> String {
-        serde_json::ser::to_string(self).unwrap()
+        serde_json::ser::to_string(self).expect(
+            "ExecProgramArgs::to_json: serde_json refused to serialise an \
+             owned struct of POD fields; this indicates the struct grew a \
+             non-serialisable field (e.g. a function pointer) without the \
+             serde-skip attribute.",
+        )
     }
 
     /// Get the input file list.

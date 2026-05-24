@@ -56,9 +56,20 @@ pub unsafe extern "C-unwind" fn libkcl_run(
 
 /// KCL CLI run function CAPI.
 fn libkcl_run_unsafe(args: *const c_char, plugin_agent: *const c_char) -> Result<String, String> {
-    let mut args = kcl_runner::ExecProgramArgs::from_json(
-        unsafe { std::ffi::CStr::from_ptr(args) }.to_str().unwrap(),
-    );
+    let args_str = unsafe { std::ffi::CStr::from_ptr(args) }
+        .to_str()
+        .map_err(|e| {
+            PanicInfo::from(format!("libkcl_run: args CStr is not valid UTF-8: {e}"))
+                .to_json_string()
+        })?;
+    // Phase 6a: route a malformed args JSON through the same
+    // PanicInfo-shaped error channel as an evaluation failure rather
+    // than panicking on .expect — the C caller (Go's cgo path) gets
+    // a structured diagnostic instead of a SIGABRT.
+    let mut args = kcl_runner::ExecProgramArgs::try_from_json(args_str).map_err(|e| {
+        PanicInfo::from(format!("libkcl_run: ExecProgramArgs JSON parse failed: {e}"))
+            .to_json_string()
+    })?;
     args.plugin_agent = plugin_agent as u64;
     exec_program(ParseSessionRef::default(), &args)
         .map_err(|e| PanicInfo::from(e.to_string()).to_json_string())
