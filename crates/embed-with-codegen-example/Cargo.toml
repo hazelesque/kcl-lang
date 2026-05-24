@@ -1,0 +1,20 @@
+[package]
+name = "embed-with-codegen-example"
+version.workspace = true
+edition.workspace = true
+description = "End-to-end runnable example: KCL schema → build.rs codegen → embedded evaluation → typed Rust access"
+publish = false
+
+# Strict lints on the hand-written shell (src/main.rs). The generated
+# code's own #![allow(...)] suppressions live inside the included
+# module via `include!(...)`.
+[lints.rust]
+unsafe_code = "deny"
+
+[dependencies]
+kcl-embed.workspace = true
+kcl-runtime.workspace = true
+anyhow = "1"
+
+[build-dependencies]
+kcl-rust-codegen.workspace = true
