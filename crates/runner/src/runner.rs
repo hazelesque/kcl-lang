@@ -382,38 +382,43 @@ impl FastRunner {
             log_message: ctx.borrow().log_message.clone(),
             ..Default::default()
         };
-        let is_err = evaluator_result.is_err();
         match evaluator_result {
-            Ok(r) => match r {
-                Ok((json, yaml)) => {
-                    result.json_result = json;
-                    result.yaml_result = yaml;
-                }
-                Err(err) => {
-                    result.err_message = err.to_string();
-                }
-            },
-            Err(err) => {
-                result.err_message = if is_err {
-                    ctx.borrow()
-                        .get_panic_info_json_string()
-                        .unwrap_or_default()
-                } else {
-                    kcl_error::err_to_str(err)
-                };
+            Ok(Ok((json, yaml))) => {
+                result.json_result = json;
+                result.yaml_result = yaml;
             }
-        }
-        // Wrap runtime JSON Panic error string into diagnostic style string.
-        if !result.err_message.is_empty() && std::env::var(KCL_DEBUG_ERROR_ENV_VAR).is_err() {
-            result.err_message = match Handler::default()
-                .add_diagnostic(<PanicInfo as Into<Diagnostic>>::into(PanicInfo::from(
-                    result.err_message.as_str(),
-                )))
-                .emit_to_string()
-            {
-                Ok(msg) => msg,
-                Err(err) => err.to_string(),
-            };
+            Ok(Err(err)) => {
+                // Evaluator returned Result::Err — not a panic. Wrap
+                // the anyhow-stringified message in a PanicInfo so the
+                // diagnostic formatter treats it the same as the
+                // caught-panic path. PanicInfo::from(&str) tolerates a
+                // non-JSON string (wraps the plain message).
+                result.err_message = emit_panic_info_to_string(PanicInfo::from(err.to_string()));
+            }
+            Err(catch_payload) => {
+                // Caught panic. The global panic hook populated
+                // KCL_RUNTIME_PANIC_RECORD, which set_panic_info copied
+                // into ctx.panic_info above; pull the structured info
+                // directly — no JSON serialise/deserialise round-trip.
+                // (Phase 6a step 4 cleanup: prior to this commit the
+                // structured PanicInfo was serialised to JSON, that
+                // JSON was stored in err_message, then later parsed
+                // back to PanicInfo and converted to Diagnostic.
+                // Identical outcome, three less hops.)
+                let info = {
+                    let ctx_ref = ctx.borrow();
+                    if ctx_ref.panic_info.__kcl_PanicInfo__ {
+                        ctx_ref.panic_info.clone()
+                    } else {
+                        // catch_unwind caught something our hook
+                        // didn't route through KCL_RUNTIME_PANIC_RECORD
+                        // (e.g. a non-string panic payload). Fall back
+                        // to the payload-stringifier helper.
+                        PanicInfo::from(kcl_error::err_to_str(catch_payload))
+                    }
+                };
+                result.err_message = emit_panic_info_to_string(info);
+            }
         }
         // Free all value references at runtime. This is because the runtime context marks
         // all KCL objects and holds their copies, so it is necessary to actively GC them.
@@ -486,46 +491,59 @@ impl FastRunner {
             log_message: ctx.borrow().log_message.clone(),
             ..Default::default()
         };
-        let is_err = evaluator_result.is_err();
         match evaluator_result {
-            Ok(r) => match r {
-                Ok(value) => {
-                    result.value = value;
-                }
-                Err(err) => {
-                    result.err_message = err.to_string();
-                }
-            },
-            Err(err) => {
-                result.err_message = if is_err {
-                    ctx.borrow()
-                        .get_panic_info_json_string()
-                        .unwrap_or_default()
-                } else {
-                    kcl_error::err_to_str(err)
-                };
+            Ok(Ok(value)) => {
+                result.value = value;
             }
-        }
-        // Wrap runtime JSON Panic error string into diagnostic style string —
-        // mirrors the same Handler-based wrapping in FastRunner::run. Phase 6a
-        // will replace this PanicInfo JSON round-trip with structured
-        // diagnostic propagation; the duplicate is intentional until then.
-        if !result.err_message.is_empty() && std::env::var(KCL_DEBUG_ERROR_ENV_VAR).is_err() {
-            result.err_message = match Handler::default()
-                .add_diagnostic(<PanicInfo as Into<Diagnostic>>::into(PanicInfo::from(
-                    result.err_message.as_str(),
-                )))
-                .emit_to_string()
-            {
-                Ok(msg) => msg,
-                Err(err) => err.to_string(),
-            };
+            Ok(Err(err)) => {
+                result.err_message = emit_panic_info_to_string(PanicInfo::from(err.to_string()));
+            }
+            Err(catch_payload) => {
+                // Phase 6a step 4: pull the structured PanicInfo from
+                // ctx directly rather than round-tripping through JSON.
+                // Mirrors FastRunner::run; the duplication will be
+                // removed in a later cleanup unifying the two methods.
+                let info = {
+                    let ctx_ref = ctx.borrow();
+                    if ctx_ref.panic_info.__kcl_PanicInfo__ {
+                        ctx_ref.panic_info.clone()
+                    } else {
+                        PanicInfo::from(kcl_error::err_to_str(catch_payload))
+                    }
+                };
+                result.err_message = emit_panic_info_to_string(info);
+            }
         }
         // GC the runtime context's tracked raw pointers; the returned
         // ValueRef stays alive because the Rc inside it independently keeps
         // the underlying allocation reachable.
         ctx.borrow().gc();
         Ok(result)
+    }
+}
+
+/// Render a [`PanicInfo`] into the final user-facing error string.
+///
+/// Default: convert to a [`Diagnostic`] and run it through
+/// [`Handler::emit_to_string`] for the formatted-error output the CLI
+/// surfaces. When the `KCL_DEBUG_ERROR` env var is set, return the
+/// raw PanicInfo as JSON — useful for evaluator-side debugging where
+/// the structured fields (`kcl_pkgpath`, `rust_file`/`rust_line`,
+/// backtrace, etc.) are more diagnostic than the prettified diagnostic.
+///
+/// Pre-Phase-6a-step-4 this work was done by serialising PanicInfo to
+/// a JSON string into `err_message`, then later parsing it back to
+/// `PanicInfo` and converting to `Diagnostic`. Same outcome, just
+/// three fewer hops with this direct call.
+fn emit_panic_info_to_string(info: PanicInfo) -> String {
+    if std::env::var(KCL_DEBUG_ERROR_ENV_VAR).is_ok() {
+        info.to_json_string()
+    } else {
+        let diagnostic: Diagnostic = info.into();
+        Handler::default()
+            .add_diagnostic(diagnostic)
+            .emit_to_string()
+            .unwrap_or_else(|err| err.to_string())
     }
 }
 
