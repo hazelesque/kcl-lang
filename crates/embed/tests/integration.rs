@@ -240,3 +240,82 @@ fn external_args_reach_option_builtin() {
         "option() didn't surface external_args value"
     );
 }
+
+/// Phase 6a step 4 eliminated the PanicInfo → JSON → string → parse →
+/// PanicInfo → Diagnostic → string round-trip in favour of a direct
+/// PanicInfo → Diagnostic → string conversion in `emit_panic_info_to_string`.
+///
+/// This test locks down the *absence* of the JSON intermediate: a
+/// runtime-triggered panic (here, a check-block violation) surfaces as
+/// an `EvaluationError::Evaluate` whose diagnostic message contains the
+/// user-facing predicate text but does NOT contain the raw JSON field
+/// names that would appear if `PanicInfo::to_json_string()` were in the
+/// pipeline (`kcl_pkgpath`, `rust_file`, `backtrace`).
+///
+/// Skipped if the consumer has explicitly opted into the JSON debug
+/// channel via `KCL_DEBUG_ERROR=1` — that env var is the documented
+/// escape hatch and reverting the diagnostic to JSON is its
+/// contracted behaviour.
+#[test]
+fn runtime_panic_surfaces_as_diagnostic_not_json() {
+    if std::env::var("KCL_DEBUG_ERROR").is_ok() {
+        eprintln!(
+            "skipping runtime_panic_surfaces_as_diagnostic_not_json: \
+             KCL_DEBUG_ERROR is set, which forces the JSON debug channel"
+        );
+        return;
+    }
+
+    let mut embedded = Embedded::new();
+    embedded
+        .register_module(
+            "tilley",
+            concat!(
+                "schema Vm:\n",
+                "    memory_mb: int\n",
+                "    check:\n",
+                "        memory_mb >= 1024, \"memory_mb must be at least 1024\"\n",
+            ),
+        )
+        .expect("register");
+    let ready = embedded.build();
+
+    let err = ready
+        .evaluate(EvaluateArgs {
+            main_source: concat!(
+                "import tilley\n",
+                "vm = tilley.Vm {memory_mb = 16}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        })
+        .expect_err("check block should fire");
+
+    let diags = match err {
+        EvaluationError::Evaluate(diags) => diags,
+        other => panic!("expected Evaluate error, got: {other:?}"),
+    };
+
+    let all_messages: String = diags
+        .iter()
+        .flat_map(|d| d.messages.iter().map(|m| m.message.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Positive: the user-facing predicate text reaches the consumer.
+    assert!(
+        all_messages.contains("memory_mb must be at least 1024"),
+        "expected check predicate text in diagnostics; got: {all_messages:?}"
+    );
+
+    // Negative: the raw PanicInfo JSON field names must NOT appear.
+    // Their presence would mean the panic info was serialised to JSON
+    // somewhere in the pipeline, which is exactly what step 4 removed.
+    for json_marker in &["kcl_pkgpath", "rust_file", "\"backtrace\""] {
+        assert!(
+            !all_messages.contains(json_marker),
+            "diagnostic message contains JSON-shape marker {json_marker:?} — \
+             the PanicInfo JSON round-trip may have crept back in: {all_messages:?}"
+        );
+    }
+}

@@ -172,6 +172,40 @@ fn test_from_str_program_arg() {
     }
 }
 
+/// Phase 6a step 3 added `try_from_json` so callers with an error-routing
+/// path (the C-ABI shim, the API service) can surface a malformed input
+/// as a structured diagnostic rather than dying with `.expect()`.
+/// Lock down the failure surface here so a future refactor that loses
+/// the Result-returning shape is caught at the unit-test level.
+#[test]
+fn try_from_json_returns_err_on_malformed_input() {
+    let err = ExecProgramArgs::try_from_json("{ not json")
+        .expect_err("malformed JSON should surface as Err");
+    // serde_json's error message references "expected" / "EOF" / similar;
+    // we don't pin the exact wording (it's a serde_json implementation
+    // detail), but it should be non-empty and printable.
+    assert!(!err.to_string().is_empty());
+
+    let err = ExecProgramArgs::try_from_json("[]")
+        .expect_err("JSON array is not a valid ExecProgramArgs shape");
+    assert!(!err.to_string().is_empty());
+}
+
+/// Empty-string and whitespace-only input should be treated as
+/// `Default::default()`, matching the pre-Phase-6a behaviour the
+/// CLI relies on (settings-file path producing empty args).
+#[test]
+fn try_from_json_empty_string_yields_default() {
+    let args = ExecProgramArgs::try_from_json("")
+        .expect("empty string should yield default args");
+    assert_eq!(args.k_filename_list, Vec::<String>::new());
+    assert_eq!(args.k_code_list, Vec::<String>::new());
+
+    let args = ExecProgramArgs::try_from_json("   \n  \t  ")
+        .expect("whitespace-only input should yield default args");
+    assert_eq!(args.k_filename_list, Vec::<String>::new());
+}
+
 #[test]
 fn test_from_setting_file_program_arg() {
     for (case_yaml, case_json) in settings_file_test_case() {
