@@ -12,16 +12,19 @@
 //! - **Phase 4** codegen: `build.rs` invokes `kcl-rust-codegen` to
 //!   produce Rust types with `TryFrom<&ValueRef>` impls, so the
 //!   Rust compiler knows the field types end-to-end.
-//! - **Phase 6b** logging: a `KCL_LOG=info` subscriber installed by
-//!   the example will surface the boundary spans
+//! - **Phase 6b** logging: a `tracing-subscriber` is installed via
+//!   `init_tracing_subscriber` so the boundary spans
 //!   (`kcl_embedded_evaluate` / `kcl_parse` / `kcl_resolve` /
-//!   `kcl_evaluate`). Run with `KCL_LOG=info cargo run -p ...` to
-//!   see them; without `KCL_LOG` set, the spans are no-ops.
+//!   `kcl_evaluate`) surface to stderr when the user runs with
+//!   `KCL_LOG=info` or finer. The default filter is `warn`, so a
+//!   casual run is quiet.
 //!
 //! Run with:
 //!
 //! ```sh
 //! cargo run -p embed-with-codegen-example
+//! KCL_LOG=info cargo run -p embed-with-codegen-example  # show spans
+//! KCL_LOG=debug cargo run -p embed-with-codegen-example # all events
 //! ```
 
 use anyhow::{Context, Result};
@@ -44,6 +47,8 @@ mod generated {
 use generated::{Disk, DiskStorageClass, Vm, VmState};
 
 fn main() -> Result<()> {
+    init_tracing_subscriber();
+
     let mut embedded = Embedded::new();
     embedded
         .register_module("infra", SCHEMA_SOURCE)
@@ -148,4 +153,40 @@ vm = infra.Vm {
 
     println!("ok: end-to-end pipeline produced typed Rust access");
     Ok(())
+}
+
+/// Install a tracing subscriber configured from the `KCL_LOG` env var.
+///
+/// Mirrors what `kcl_cmd::main` does for the real CLI — `try_init`
+/// installs as a process-global default so the Phase 6b boundary
+/// spans (`kcl_embedded_evaluate`, `kcl_parse`, `kcl_resolve`,
+/// `kcl_evaluate`) surface to a subscriber that knows what to do
+/// with them.
+///
+/// Default filter ("warn") keeps the example quiet for a casual
+/// reader. Run with `KCL_LOG=info cargo run -p embed-with-codegen-example`
+/// to see the spans, `KCL_LOG=debug` for finer detail.
+///
+/// Library crates (`kcl-embed` itself) deliberately don't install
+/// a subscriber — that's the consumer's job. This function is the
+/// consumer doing its job, with deliberately ergonomic defaults so
+/// the example demonstrates the recommended pattern.
+fn init_tracing_subscriber() {
+    let filter = tracing_subscriber::EnvFilter::try_from_env("KCL_LOG")
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    // `with_span_events(FmtSpan::ENTER | FmtSpan::EXIT)` is what makes
+    // the Phase 6b boundary spans visible at all — by default the fmt
+    // layer only emits formatted events (the contents of info!/debug!
+    // calls), not span lifecycle markers. The boundary spans contain
+    // no events inside them (they're pure timing markers), so without
+    // this they would be invisible to KCL_LOG=info even though the
+    // dispatcher is correctly wired.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_span_events(
+            tracing_subscriber::fmt::format::FmtSpan::ENTER
+                | tracing_subscriber::fmt::format::FmtSpan::EXIT,
+        )
+        .try_init();
 }

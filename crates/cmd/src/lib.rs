@@ -36,24 +36,38 @@ pub fn main(args: &[&str]) -> Result<()> {
 
 /// Install a tracing subscriber configured from the `KCL_LOG` env var.
 ///
-/// `KCL_LOG=info` (the default when unset) shows the once-per-evaluation
-/// spans from Phase 6b: `kcl_parse`, `kcl_resolve`, `kcl_evaluate`,
-/// and the top-level `kcl_exec_program` / `kcl_exec_program_to_value` /
-/// `kcl_embedded_evaluate` spans. `KCL_LOG=debug` adds hot-path debug
-/// events; `KCL_LOG=trace` adds the most detailed events. Library
-/// consumers (`kcl-embed`, `kcl-runner`, `kcl-api`) deliberately do
-/// NOT install a subscriber — that's the binary's job. If no
-/// subscriber is installed, all tracing macros are no-ops.
+/// Default filter is `warn` so a casual `kcl run foo.k` invocation is
+/// quiet — users get the YAML/JSON result on stdout without 8 lines
+/// of span lifecycle noise on stderr. Run with `KCL_LOG=info` to see
+/// the Phase 6b once-per-evaluation spans: `kcl_parse`,
+/// `kcl_resolve`, `kcl_evaluate`, and the top-level
+/// `kcl_exec_program` / `kcl_exec_program_to_value` /
+/// `kcl_embedded_evaluate` spans. `KCL_LOG=debug` and `KCL_LOG=trace`
+/// add hot-path events.
+///
+/// `with_span_events(ENTER | EXIT)` is what makes the boundary spans
+/// visible at all — by default the fmt layer only emits events from
+/// info!/debug!/etc. macro calls, not span lifecycle markers. The
+/// boundary spans contain no events inside them (they're pure timing
+/// markers), so without this they would be invisible to KCL_LOG=info.
+///
+/// Library consumers (`kcl-embed`, `kcl-runner`, `kcl-api`)
+/// deliberately do NOT install a subscriber — that's the binary's
+/// job. If no subscriber is installed, all tracing macros are no-ops.
 ///
 /// `try_init` is used so a second call (e.g. via a host that already
 /// initialised tracing) silently no-ops rather than panicking. The
 /// `let _ = ...` discards the resulting `Result`.
 fn init_tracing_subscriber() {
     let filter = tracing_subscriber::EnvFilter::try_from_env("KCL_LOG")
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        .with_span_events(
+            tracing_subscriber::fmt::format::FmtSpan::ENTER
+                | tracing_subscriber::fmt::format::FmtSpan::EXIT,
+        )
         .try_init();
 }
 

@@ -81,13 +81,29 @@ belong in the entry-point crates (`kcl-embed`, `kcl-runner`,
 ## Subscriber setup
 
 CLI binaries (`kcl`, `kcl-language-server`) install a
-`tracing_subscriber::fmt` subscriber gated on the `KCL_LOG` env var:
+`tracing_subscriber::fmt` subscriber gated on the `KCL_LOG` env var.
+Two pieces are load-bearing:
+
+1. **Default filter `warn`** so a casual `kcl run foo.k` invocation is
+   quiet — the user gets the YAML/JSON result on stdout without
+   8 lines of span lifecycle noise on stderr.
+2. **`with_span_events(ENTER | EXIT)`** so the Phase 6b boundary
+   spans (`kcl_parse`, `kcl_resolve`, `kcl_evaluate`, etc.) are
+   actually visible. By default the fmt layer only emits events from
+   `info!`/`debug!`/etc. macro calls, not span lifecycle markers.
+   The boundary spans contain no events inside them (they're pure
+   timing markers), so without this they would be invisible to
+   `KCL_LOG=info` even though the dispatcher is correctly wired.
 
 ```rust
+let filter = tracing_subscriber::EnvFilter::try_from_env("KCL_LOG")
+    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
 let _ = tracing_subscriber::fmt()
-    .with_env_filter(
-        tracing_subscriber::EnvFilter::try_from_env("KCL_LOG")
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    .with_env_filter(filter)
+    .with_writer(std::io::stderr)
+    .with_span_events(
+        tracing_subscriber::fmt::format::FmtSpan::ENTER
+            | tracing_subscriber::fmt::format::FmtSpan::EXIT,
     )
     .try_init();
 ```
