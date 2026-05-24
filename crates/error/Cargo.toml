@@ -17,7 +17,7 @@ kcl-runtime.workspace = true
 kcl-utils.workspace = true
 
 anyhow = "1.0"
-tracing = "0.1"
+tracing.workspace = true
 annotate-snippets = { version = "0.9.2", default-features = false, features = [
     "color",
 ] }

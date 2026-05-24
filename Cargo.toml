@@ -43,6 +43,21 @@ kcl-version = { path = "crates/version" }
 
 serde_yaml = { path = "3rdparty/serde_yaml" }
 
+# Phase 6b: structured logging.
+#
+# `release_max_level_info` is the tracing crate's compile-time gate.
+# In release builds it elides `trace!` and `debug!` macros to no-ops
+# (the macros expand to nothing) so per-AST-node / per-attribute
+# instrumentation in evaluator/runtime/runner has *zero* runtime cost
+# in the hot path once optimised. `info!` and above are preserved in
+# release — those are reserved for once-per-evaluation events
+# (program start, program completion, top-level errors). See the plan
+# at /home/hazel/.claude/plans/ok-please-put-a-stateless-candy.md
+# §"Phase 6b" for the no-info!-in-hot-loops rule and the CI grep
+# that enforces it.
+tracing = { version = "0.1", features = ["release_max_level_info"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
 [workspace.package]
 version = "0.12.3"
 edition = "2024"
