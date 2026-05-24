@@ -41,6 +41,13 @@ jobs:
       - name: Code clippy check
         run: make lint-all
         shell: bash
+      - name: Hot-path logging discipline (Phase 6b)
+        # Enforces the no-info!-in-hot-loops rule documented in
+        # docs/dev_guide/logging-conventions.md. Fast — pure grep,
+        # source-only, platform-independent — so it runs once here
+        # rather than being duplicated across every per-platform job.
+        run: ./scripts/check-no-hot-path-info.sh
+        shell: bash
       - name: Grammar test
         run: export PATH=$PATH:$PWD/_build/dist/linux/core && make && make test-grammar
         shell: bash
