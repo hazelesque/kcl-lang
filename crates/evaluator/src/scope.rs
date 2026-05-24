@@ -210,17 +210,26 @@ impl<'ctx> Evaluator<'ctx> {
     /// Append a variable into the scope
     pub fn add_variable(&self, name: &str, pointer: ValueRef) {
         let current_pkgpath = self.current_pkgpath();
-        let pkg_scopes = &mut self.pkg_scopes.borrow_mut();
-        let msg = format!("pkgpath {} is not found", current_pkgpath);
-        let scopes = pkg_scopes.get_mut(&current_pkgpath).expect(&msg);
-        let mut existed = false;
-        if let Some(last) = scopes.last_mut() {
-            let variables = &mut last.variables;
-            existed = variables.contains_key(name);
-            variables.insert(name.to_string(), pointer.clone());
-        }
-        // Release the borrow before calling update_lazy_scope_cache
-        drop(pkg_scopes);
+        // Scoped block so the RefMut is dropped before
+        // update_lazy_scope_cache runs. (The cache call currently
+        // borrows self.lazy_scopes only, not self.pkg_scopes, so the
+        // overlap would be benign today — but a future refactor that
+        // touches pkg_scopes from inside the cache update would
+        // panic on a re-borrow. The scope makes the boundary
+        // explicit, replacing a pre-existing `drop(&mut RefMut)`
+        // that didn't actually release the borrow.)
+        let existed = {
+            let mut pkg_scopes = self.pkg_scopes.borrow_mut();
+            let msg = format!("pkgpath {} is not found", current_pkgpath);
+            let scopes = pkg_scopes.get_mut(&current_pkgpath).expect(&msg);
+            let mut existed = false;
+            if let Some(last) = scopes.last_mut() {
+                let variables = &mut last.variables;
+                existed = variables.contains_key(name);
+                variables.insert(name.to_string(), pointer.clone());
+            }
+            existed
+        };
         // If updating an existing variable, also update the lazy scope cache
         // to avoid stale references when the variable is reassigned with a new
         // ValueRef (for example, via += which creates a new list).
