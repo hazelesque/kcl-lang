@@ -26,3 +26,6 @@ kcl-parser.workspace = true
 kcl-runner.workspace = true
 kcl-runtime.workspace = true
 kcl-sema.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

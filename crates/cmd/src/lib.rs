@@ -19,6 +19,7 @@ use run::run_command;
 
 /// Run the KCL main command.
 pub fn main(args: &[&str]) -> Result<()> {
+    init_tracing_subscriber();
     let matches = app().arg_required_else_help(true).get_matches_from(args);
     // Sub commands
     match matches.subcommand() {
@@ -31,6 +32,29 @@ pub fn main(args: &[&str]) -> Result<()> {
         Some(("server", _)) => kcl_api::service::jsonrpc::start_stdio_server(),
         _ => Ok(()),
     }
+}
+
+/// Install a tracing subscriber configured from the `KCL_LOG` env var.
+///
+/// `KCL_LOG=info` (the default when unset) shows the once-per-evaluation
+/// spans from Phase 6b: `kcl_parse`, `kcl_resolve`, `kcl_evaluate`,
+/// and the top-level `kcl_exec_program` / `kcl_exec_program_to_value` /
+/// `kcl_embedded_evaluate` spans. `KCL_LOG=debug` adds hot-path debug
+/// events; `KCL_LOG=trace` adds the most detailed events. Library
+/// consumers (`kcl-embed`, `kcl-runner`, `kcl-api`) deliberately do
+/// NOT install a subscriber — that's the binary's job. If no
+/// subscriber is installed, all tracing macros are no-ops.
+///
+/// `try_init` is used so a second call (e.g. via a host that already
+/// initialised tracing) silently no-ops rather than panicking. The
+/// `let _ = ...` discards the resulting `Result`.
+fn init_tracing_subscriber() {
+    let filter = tracing_subscriber::EnvFilter::try_from_env("KCL_LOG")
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
 }
 
 /// Get the CLI application including a run command and

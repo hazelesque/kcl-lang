@@ -241,6 +241,105 @@ fn external_args_reach_option_builtin() {
     );
 }
 
+/// Phase 6b: install a process-wide tracing recorder once (the test
+/// binary's first test through this helper wins; subsequent tests
+/// share the same recorder). Then trigger an Embedded::evaluate and
+/// assert the Phase 6b boundary spans appear in the recorder's
+/// accumulated log.
+///
+/// This recorder pattern handles the parallel-test reality cleanly:
+/// every test that calls evaluate() will dispatch spans into the
+/// shared recorder, so the assertion holds regardless of which other
+/// tests are running concurrently. The recorder accumulates spans
+/// from all tests in this binary; we only assert *presence*, not
+/// exclusivity. Using `with_default` instead would fight tracing's
+/// callsite interest cache under parallel execution (a known footgun
+/// — `with_default` is thread-local, but tracing's per-callsite
+/// Interest can poison once seen with no subscriber attached).
+///
+/// If a future refactor removes the `kcl_parse` / `kcl_resolve` /
+/// `kcl_evaluate` spans or renames the top-level
+/// `kcl_embedded_evaluate` span, this test fails.
+#[test]
+fn evaluation_emits_expected_phase_spans() {
+    use std::sync::{Arc, Mutex, OnceLock};
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    #[derive(Clone, Default)]
+    struct SpanRecorder {
+        observed: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for SpanRecorder
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if let Ok(mut guard) = self.observed.lock() {
+                guard.push(attrs.metadata().name().to_string());
+            }
+        }
+    }
+
+    static SHARED_RECORDER: OnceLock<Arc<Mutex<Vec<String>>>> = OnceLock::new();
+
+    let observed = SHARED_RECORDER
+        .get_or_init(|| {
+            let recorder = SpanRecorder::default();
+            let observed = recorder.observed.clone();
+            // try_init returns Err if a global subscriber already
+            // exists; either way, our OnceLock-stored Arc is the one
+            // we'll read from when the test asserts. The dispatch
+            // result here only matters if we won the install race.
+            let _ = tracing_subscriber::registry()
+                .with(recorder)
+                .try_init();
+            observed
+        })
+        .clone();
+
+    let observed_before = observed.lock().unwrap().len();
+
+    let mut embedded = Embedded::new();
+    embedded
+        .register_module(
+            "tilley",
+            "schema Vm:\n    name: str\n    memory_mb: int = 1024\n",
+        )
+        .expect("register");
+    let ready = embedded.build();
+    let _ = ready
+        .evaluate(EvaluateArgs {
+            main_source: "import tilley\nvm = tilley.Vm {name = \"alpha\"}\n"
+                .to_string(),
+            ..EvaluateArgs::default()
+        })
+        .expect("evaluate");
+
+    let snapshot = observed.lock().unwrap().clone();
+    // Either look at just our window OR the full accumulated log;
+    // either way the four span names must be present. Using the full
+    // log is more tolerant of concurrent test span ordering.
+    let _ = observed_before; // window unused; full snapshot is sufficient
+    for required in &[
+        "kcl_embedded_evaluate",
+        "kcl_parse",
+        "kcl_resolve",
+        "kcl_evaluate",
+    ] {
+        assert!(
+            snapshot.iter().any(|s| s == required),
+            "expected span {required:?} not observed; got: {snapshot:?}"
+        );
+    }
+}
+
 /// Phase 6a step 4 eliminated the PanicInfo → JSON → string → parse →
 /// PanicInfo → Diagnostic → string round-trip in favour of a direct
 /// PanicInfo → Diagnostic → string conversion in `emit_panic_info_to_string`.
