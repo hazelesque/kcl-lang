@@ -49,6 +49,7 @@ use std::sync::Arc;
 use kcl_parser::{ParseSession, load_program};
 use kcl_sema::resolver::resolve_program;
 
+mod annotation;
 mod emit;
 mod ir;
 
@@ -288,6 +289,97 @@ mod tests {
             }
             other => panic!("expected UnsupportedFeature, got: {other:?}"),
         }
+    }
+
+    /// Phase 4B step 1: schema-level `# @rust: tagged_enum(...)`
+    /// and per-field `# @rust: variant(...)` / `# @rust: shared`
+    /// annotations are parsed and attached to the IR.
+    ///
+    /// This test only verifies *parsing and attachment* — codegen
+    /// still emits the flat-struct shape at this step. Step 2
+    /// wires the annotations into emission.
+    #[test]
+    fn tagged_enum_annotations_are_attached_to_ir() {
+        use crate::annotation::FieldAnnotation;
+        // Two-space indent in the source matters: KCL's parser
+        // tracks columns, and the trailing-comment matcher uses
+        // line equality. The annotation comments live on the same
+        // line as their fields.
+        let src = concat!(
+            "# @rust: tagged_enum(discriminator = \"type\")\n",
+            "schema TestAssertion:\n",
+            "    type: \"command\" | \"service\"\n",
+            "    description?: str  # @rust: shared\n",
+            "    command?: str  # @rust: variant(\"command\")\n",
+            "    service?: str  # @rust: variant(\"service\")\n",
+        );
+        let module = analyse_inline_source(src).expect("analyse");
+        assert_eq!(module.schemas.len(), 1);
+        let s = &module.schemas[0];
+        let tagged = s
+            .annotations
+            .tagged_enum
+            .as_ref()
+            .expect("tagged_enum annotation should be attached");
+        assert_eq!(tagged.discriminator, "type");
+        assert!(
+            matches!(s.annotations.fields.get("description"), Some(FieldAnnotation::Shared)),
+            "description should be marked shared; got {:?}",
+            s.annotations.fields.get("description"),
+        );
+        assert!(
+            matches!(
+                s.annotations.fields.get("command"),
+                Some(FieldAnnotation::Variant(v)) if v == "command",
+            ),
+            "command should be marked variant(\"command\"); got {:?}",
+            s.annotations.fields.get("command"),
+        );
+        assert!(
+            matches!(
+                s.annotations.fields.get("service"),
+                Some(FieldAnnotation::Variant(v)) if v == "service",
+            ),
+            "service should be marked variant(\"service\"); got {:?}",
+            s.annotations.fields.get("service"),
+        );
+        // The discriminator field itself should NOT have a variant
+        // annotation (annotation comment on its line would be a
+        // user error; here we just confirm absence is fine).
+        assert!(s.annotations.fields.get("type").is_none());
+    }
+
+    /// A schema with no `@rust:` annotations at all should leave
+    /// `annotations` empty — codegen continues to use the default
+    /// flat-struct path.
+    #[test]
+    fn no_annotations_means_empty_annotations_field() {
+        let src = concat!(
+            "schema Plain:\n",
+            "    name: str\n",
+            "    count: int = 1\n",
+        );
+        let module = analyse_inline_source(src).expect("analyse");
+        let s = &module.schemas[0];
+        assert!(s.annotations.tagged_enum.is_none());
+        assert!(s.annotations.fields.is_empty());
+    }
+
+    /// Malformed annotations surface as `CodegenError::InvalidAnnotation`
+    /// rather than a confusing parse/resolve error or silently
+    /// ignored. Locks down the "fail loudly" contract.
+    #[test]
+    fn malformed_annotation_errors_with_invalid_annotation() {
+        let src = concat!(
+            "# @rust: tagged_enum(missing_paren_close\n",
+            "schema X:\n",
+            "    a: str\n",
+        );
+        let err = analyse_inline_source(src).expect_err("should fail");
+        assert!(
+            matches!(err, CodegenError::InvalidAnnotation(_)),
+            "expected InvalidAnnotation; got {err:?}"
+        );
     }
 
     /// Lifted enum name collision: a schema literally named the same

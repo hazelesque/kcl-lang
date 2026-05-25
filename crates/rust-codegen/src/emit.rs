@@ -358,6 +358,7 @@ mod tests {
             source_line: 0,
             fields,
             doc: String::new(),
+            annotations: Default::default(),
         }
     }
 

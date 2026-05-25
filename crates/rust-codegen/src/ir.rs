@@ -8,11 +8,14 @@
 //! derived from `kcl-sema`'s resolved `SchemaType` + `SchemaAttr`
 //! representation, stripped down to the subset codegen consumes.
 
-use kcl_ast::ast::Program;
+use std::collections::HashMap;
+
+use kcl_ast::ast::{Program, SchemaAttr, SchemaStmt, Stmt};
 use kcl_sema::resolver::scope::ProgramScope;
 use kcl_sema::ty::{SchemaType, TypeKind};
 
 use crate::CodegenError;
+use crate::annotation::{RawAnnotation, SchemaAnnotations, parse_rust_annotation};
 
 /// Top-level codegen IR for a single KCL source file.
 #[derive(Debug, Clone, Default)]
@@ -45,6 +48,13 @@ pub struct SchemaIR {
     /// The schema's docstring, if any. Forwarded to the generated
     /// Rust type's rustdoc.
     pub doc: String,
+    /// `# @rust:` annotations parsed from the comments surrounding
+    /// this schema's declaration. `None` means the schema codegens
+    /// as the default flat struct (the Phase 4 MVP shape); `Some(_)`
+    /// with a `tagged_enum` annotation means [`crate::emit`] should
+    /// promote the schema to a Rust `enum`. See
+    /// [`crate::annotation`] for the annotation grammar.
+    pub(crate) annotations: SchemaAnnotations,
 }
 
 /// Codegen IR for a single field within a [`SchemaIR`].
@@ -173,7 +183,8 @@ impl FieldKind {
 
 /// Walk the resolved program's main package, extract every schema
 /// declaration as a [`SchemaIR`], collect any lifted enums into the
-/// shared [`ModuleIR`].
+/// shared [`ModuleIR`]. Parses `# @rust:` annotations from the AST
+/// comments and attaches them to the appropriate schema/field IR.
 pub(crate) fn extract_module(
     program: &Program,
     scope: &ProgramScope,
@@ -192,6 +203,13 @@ pub(crate) fn extract_module(
         None => return Ok(module),
     };
 
+    // Build a name → (line → AST positions) index from the program's
+    // modules. We use it to look up per-schema and per-field source
+    // positions for annotation matching. (kcl-sema's `SchemaType`
+    // does carry `filename` and the scope's start.line, but not
+    // per-attribute lines.)
+    let position_index = build_position_index(program);
+
     let scope_borrow = main_pkg_scopes.borrow();
     for (name, obj_rc) in scope_borrow.elems.iter() {
         let obj = obj_rc.borrow();
@@ -203,13 +221,93 @@ pub(crate) fn extract_module(
             continue;
         }
         let source_line = obj.start.line;
-        let schema_ir = schema_to_ir(name.clone(), &ty, source_line, &mut module)?;
+        let positions = position_index.get(name.as_str());
+        let schema_ir = schema_to_ir(
+            name.clone(),
+            &ty,
+            source_line,
+            positions,
+            &mut module,
+        )?;
         module.schemas.push(schema_ir);
     }
 
     detect_lifted_enum_collisions(&module)?;
 
     Ok(module)
+}
+
+/// Per-schema source positions captured from the AST, indexed by
+/// field name. The schema's own declaration line and the module's
+/// comment list ride alongside.
+#[derive(Debug, Default)]
+struct SchemaPositions {
+    /// Line of the `schema X:` declaration.
+    schema_line: u64,
+    /// Field name → declaration line.
+    field_lines: HashMap<String, u64>,
+    /// The module's comment list, cloned so it can be matched to
+    /// schemas across iterations without re-locking the parser's
+    /// shared module storage.
+    comments: Vec<CommentPos>,
+}
+
+/// Minimal projection of an AST `Comment` node — text + line — so
+/// the annotation parser can match by line number without depending
+/// on the full AST representation.
+#[derive(Debug, Clone)]
+struct CommentPos {
+    text: String,
+    line: u64,
+}
+
+/// Build the per-schema position index from `program.modules`.
+fn build_position_index(program: &Program) -> HashMap<String, SchemaPositions> {
+    let mut out: HashMap<String, SchemaPositions> = HashMap::new();
+
+    for module_arc in program.modules.values() {
+        let Ok(module) = module_arc.read() else {
+            continue;
+        };
+        let comments: Vec<CommentPos> = module
+            .comments
+            .iter()
+            .map(|c| CommentPos {
+                text: c.node.text.clone(),
+                line: c.line,
+            })
+            .collect();
+        for stmt_node in &module.body {
+            if let Stmt::Schema(schema_stmt) = &stmt_node.node {
+                let positions = build_positions_for_schema(
+                    stmt_node.line,
+                    schema_stmt,
+                    &comments,
+                );
+                out.insert(schema_stmt.name.node.clone(), positions);
+            }
+        }
+    }
+
+    out
+}
+
+fn build_positions_for_schema(
+    schema_line: u64,
+    schema_stmt: &SchemaStmt,
+    comments: &[CommentPos],
+) -> SchemaPositions {
+    let mut field_lines = HashMap::new();
+    for body_node in &schema_stmt.body {
+        if let Stmt::SchemaAttr(SchemaAttr { name, .. }) = &body_node.node {
+            field_lines.insert(name.node.clone(), body_node.line);
+        }
+    }
+    SchemaPositions {
+        schema_line,
+        field_lines,
+        comments: comments.to_vec(),
+    }
 }
 
 /// A lifted enum's Rust name is `<SchemaName><FieldName>` in
@@ -249,6 +347,7 @@ fn schema_to_ir(
     name: String,
     ty: &SchemaType,
     source_line: u64,
+    positions: Option<&SchemaPositions>,
     module: &mut ModuleIR,
 ) -> Result<SchemaIR, CodegenError> {
     if ty.base.is_some() {
@@ -281,13 +380,102 @@ fn schema_to_ir(
         });
     }
 
+    let annotations = match positions {
+        Some(p) => extract_annotations(&name, p)?,
+        None => SchemaAnnotations::default(),
+    };
+
     Ok(SchemaIR {
         name,
         source_file: ty.filename.clone(),
         source_line,
         fields,
         doc: ty.doc.clone(),
+        annotations,
     })
+}
+
+/// Match comments against the schema's declaration position and each
+/// of its fields' positions, parse any `@rust:` annotations into the
+/// [`SchemaAnnotations`] structure.
+///
+/// Matching rules:
+/// - **Schema-level annotation** lives on the *immediately preceding*
+///   line (e.g. `# @rust: tagged_enum(...)` on line N-1 when the
+///   schema is declared at line N).
+/// - **Field-level annotation** lives as a *trailing* comment on the
+///   same line as the field declaration (e.g.
+///   `command?: str  # @rust: variant("command")` on the same line).
+///   This matches the KCL convention where comments after a
+///   declaration's `:` are commonly used for inline notes.
+///
+/// The annotation parser surfaces malformed `@rust:` directives as
+/// `CodegenError::InvalidAnnotation`; this function propagates those
+/// without modification.
+fn extract_annotations(
+    schema_name: &str,
+    positions: &SchemaPositions,
+) -> Result<SchemaAnnotations, CodegenError> {
+    let mut out = SchemaAnnotations::default();
+
+    // Schema-level: comment on the line immediately above the
+    // `schema X:` declaration.
+    if positions.schema_line > 0 {
+        let target_line = positions.schema_line - 1;
+        for c in &positions.comments {
+            if c.line == target_line {
+                if let Some(anno) = parse_rust_annotation(&c.text)? {
+                    match anno {
+                        RawAnnotation::TaggedEnum(t) => {
+                            if out.tagged_enum.is_some() {
+                                return Err(CodegenError::InvalidAnnotation(format!(
+                                    "schema {schema_name}: duplicate tagged_enum annotation"
+                                )));
+                            }
+                            out.tagged_enum = Some(t);
+                        }
+                        RawAnnotation::Field(_) => {
+                            return Err(CodegenError::InvalidAnnotation(format!(
+                                "schema {schema_name}: field-level annotation on schema declaration line"
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Field-level: trailing comments on the same line as the field
+    // declaration. The comments preserved on `Module.comments`
+    // include a leading `#` but no further structural info, so the
+    // "trailing same line" check is line-equality.
+    for (field_name, field_line) in &positions.field_lines {
+        for c in &positions.comments {
+            if c.line != *field_line {
+                continue;
+            }
+            let Some(anno) = parse_rust_annotation(&c.text)? else {
+                continue;
+            };
+            match anno {
+                RawAnnotation::Field(f) => {
+                    if out.fields.contains_key(field_name) {
+                        return Err(CodegenError::InvalidAnnotation(format!(
+                            "schema {schema_name}.{field_name}: duplicate field annotation"
+                        )));
+                    }
+                    out.fields.insert(field_name.clone(), f);
+                }
+                RawAnnotation::TaggedEnum(_) => {
+                    return Err(CodegenError::InvalidAnnotation(format!(
+                        "schema {schema_name}.{field_name}: schema-level annotation on field line"
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 /// Map a `kcl_sema::ty::TypeKind` to a [`FieldKind`]. Side-effects:
