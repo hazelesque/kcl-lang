@@ -534,3 +534,196 @@ fn runtime_panic_surfaces_as_diagnostic_not_json() {
         );
     }
 }
+
+/// Investigation test for the helper-lambda coercion gap discovered
+/// during Phase 7 (Tilley adoption). The KCL idiom:
+///
+///     make_point = lambda x: int, y: int -> Point {
+///         {x = x, y = y}
+///     }
+///
+/// declares a lambda whose return type is annotated as `Point` and
+/// whose body returns a bare dict literal. Under the legacy
+/// `API::exec_program` path Tilley used, this *appears* to coerce
+/// the dict to a Point schema instance — Tilley's helpers.k uses
+/// the pattern extensively and config validation never complained.
+/// Under the new `Embedded::evaluate` path, the same idiom surfaces
+/// the bare dict as a dict (`is_schema() == false`), breaking any
+/// consumer that requires a schema instance.
+///
+/// This test pins the current behaviour so future investigation has
+/// a clear "what does it do today" anchor. The fix — once the root
+/// cause is understood — may be to restore implicit coercion in
+/// the evaluator (if the legacy path was doing it), to surface a
+/// resolve-time error (if the lambda body should require explicit
+/// schema construction), or to teach codegen consumers of helpers
+/// to construct schemas explicitly.
+///
+/// Currently asserts the *observed* behaviour (lambda returns dict).
+/// If a fix lands and the lambda starts returning a schema, this
+/// test will flip — at which point the assertion should be updated
+/// to require schema-ness.
+#[test]
+fn lambda_returning_dict_with_schema_return_type_yields_dict() {
+    // First experiment: schema + lambda in the SAME virtual module,
+    // imported by main.
+    let mut embedded = Embedded::new();
+    embedded
+        .register_module(
+            "m",
+            concat!(
+                "schema Point:\n",
+                "    x: int\n",
+                "    y: int\n",
+                "\n",
+                "make_point = lambda x: int, y: int -> Point {\n",
+                "    {x = x, y = y}\n",
+                "}\n",
+            ),
+        )
+        .expect("register");
+    let ready = embedded.build();
+
+    let result = ready.evaluate(EvaluateArgs {
+        main_source: concat!(
+            "import m\n",
+            "direct = m.Point {x = 1, y = 2}\n",
+            "via_lambda = m.make_point(3, 4)\n",
+        )
+        .to_string(),
+        ..EvaluateArgs::default()
+    });
+
+    // Document the OBSERVED current behaviour. As of this test's
+    // creation, the lambda body is rejected at sema time with
+    // "expect m.Point, got dict" — i.e. the type-checker doesn't
+    // coerce the bare-dict body to the declared return-type Point.
+    // Tilley's helpers.k relies on this coercion working
+    // (presumably under the legacy API path); the new Embedded path
+    // refuses.
+    //
+    // The assertion below is the *current* behaviour. When this is
+    // fixed, the assertion needs to flip to expect Ok.
+    match result {
+        Ok(outcome) => {
+            // Fix has landed; tighten the test.
+            let via_lambda = outcome
+                .value
+                .dict_get_value("via_lambda")
+                .expect("via_lambda");
+            assert!(
+                via_lambda.is_schema(),
+                "if evaluate succeeded, via_lambda should be a schema"
+            );
+            assert_eq!(via_lambda.as_schema().name, "Point");
+        }
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                msg.contains("expect m.Point, got dict")
+                    || msg.contains("expect Point, got dict"),
+                "expected the documented coercion error; got: {msg}"
+            );
+        }
+    }
+}
+
+/// Diagnosis-of-#73: the lambda body coercion bug is actually
+/// **parameter-name shadowing**. When the lambda parameter shares
+/// a name with a schema field being assigned in the body, KCL
+/// resolves the field-name LHS to the lambda parameter and the
+/// dict ends up "empty" from the schema's perspective. Renaming
+/// the parameter to avoid the shadow makes the same lambda work
+/// under both legacy and Embedded paths.
+///
+/// Verified via the legacy CLI too: `make_point = lambda x: int,
+/// y: int -> Point { {x = x, y = y} }` fails identically with
+/// "expect Point, got dict"; `lambda xv: int, yv: int -> Point
+/// { {x = xv, y = yv} }` works.
+///
+/// Implication for Tilley: the helpers in helpers.k use exactly
+/// this shadowing pattern (e.g. `lambda cidr: str -> NetworkDefinition
+/// { { cidr = cidr } }`). They were never actually working under
+/// the legacy path either; real Tilleyfiles must have been
+/// constructing networks/vms directly without going through them.
+/// Fix is local: rewrite helpers.k to use non-shadowing parameter
+/// names.
+#[test]
+fn lambda_param_shadow_fix_works_under_embed() {
+    let ready = Embedded::new().build();
+    let outcome = ready
+        .evaluate(EvaluateArgs {
+            main_source: concat!(
+                "schema Point:\n",
+                "    x: int\n",
+                "    y: int\n",
+                "\n",
+                "make_point = lambda xv: int, yv: int -> Point {\n",
+                "    {x = xv, y = yv}\n",
+                "}\n",
+                "\n",
+                "p = make_point(7, 9)\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        })
+        .expect("evaluate should succeed without param shadowing");
+
+    let p = outcome.value.dict_get_value("p").expect("p");
+    assert!(p.is_schema(), "with renamed params, body coerces to schema");
+    assert_eq!(p.as_schema().name, "Point");
+    assert_eq!(p.dict_get_value("x").unwrap().as_int(), 7);
+    assert_eq!(p.dict_get_value("y").unwrap().as_int(), 9);
+}
+
+/// Companion test: same schema + lambda in the *main* source
+/// (no virtual modules). Pins whether the issue is specific to
+/// virtual-package module imports or a more general lambda-return-type
+/// coercion gap.
+#[test]
+fn lambda_returning_dict_with_schema_return_type_in_main_source() {
+    let ready = Embedded::new().build();
+    let result = ready.evaluate(EvaluateArgs {
+        main_source: concat!(
+            "schema Point:\n",
+            "    x: int\n",
+            "    y: int\n",
+            "\n",
+            "make_point = lambda x: int, y: int -> Point {\n",
+            "    {x = x, y = y}\n",
+            "}\n",
+            "\n",
+            "direct = Point {x = 1, y = 2}\n",
+            "via_lambda = make_point(3, 4)\n",
+        )
+        .to_string(),
+        ..EvaluateArgs::default()
+    });
+
+    match result {
+        Ok(outcome) => {
+            let via_lambda = outcome
+                .value
+                .dict_get_value("via_lambda")
+                .expect("via_lambda");
+            eprintln!(
+                "main-source: evaluate Ok; via_lambda is_schema={} is_dict={} type={}",
+                via_lambda.is_schema(),
+                via_lambda.is_dict(),
+                via_lambda.type_str(),
+            );
+            assert!(
+                via_lambda.is_schema(),
+                "main-source lambda body should coerce to Point"
+            );
+        }
+        Err(e) => {
+            eprintln!("main-source: evaluate Err: {e:?}");
+            let msg = format!("{e:?}");
+            assert!(
+                msg.contains("Point") && msg.contains("dict"),
+                "expected coercion-related error; got: {msg}"
+            );
+        }
+    }
+}
