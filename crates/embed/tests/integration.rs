@@ -260,50 +260,114 @@ fn external_args_reach_option_builtin() {
 /// If a future refactor removes the `kcl_parse` / `kcl_resolve` /
 /// `kcl_evaluate` spans or renames the top-level
 /// `kcl_embedded_evaluate` span, this test fails.
-#[test]
-fn evaluation_emits_expected_phase_spans() {
+/// Shared tracing capture state for the Phase 6b span tests. Two
+/// independent capture surfaces, both fed by one process-wide
+/// subscriber:
+///
+/// - `span_names` — populated by a custom `Layer::on_new_span` that
+///   records the span's metadata name. Tests the dispatch layer:
+///   "did the span actually fire?"
+/// - `fmt_buffer` — populated by a `tracing_subscriber::fmt::Layer`
+///   with `with_span_events(ENTER | EXIT)` writing into an in-memory
+///   buffer. Tests what a *user* sees: "did the formatted output
+///   actually contain the span name?"
+///
+/// The split matters because of the silent-spans bug (kcl-lang
+/// commit `108292b6`) — the dispatch layer was correct, but the
+/// CLI's fmt subscriber lacked `with_span_events(...)` so
+/// `KCL_LOG=info kcl run foo.k` was silent on the boundary spans
+/// even though the dispatcher was wired. A test that only checked
+/// "did the Layer receive the span?" passed; the user-observable
+/// "did anything appear on stderr?" property was untested.
+struct TracingCaptures {
+    span_names: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    fmt_buffer: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
+#[derive(Clone)]
+struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for SharedBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Ok(mut guard) = self.0.lock() {
+            guard.extend_from_slice(buf);
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedBuf {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self {
+        self.clone()
+    }
+}
+
+#[derive(Clone, Default)]
+struct SpanRecorder {
+    observed: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl<S> tracing_subscriber::Layer<S> for SpanRecorder
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        _id: &tracing::span::Id,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if let Ok(mut guard) = self.observed.lock() {
+            guard.push(attrs.metadata().name().to_string());
+        }
+    }
+}
+
+fn ensure_tracing_init() -> &'static TracingCaptures {
     use std::sync::{Arc, Mutex, OnceLock};
+    use tracing_subscriber::fmt::format::FmtSpan;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    #[derive(Clone, Default)]
-    struct SpanRecorder {
-        observed: Arc<Mutex<Vec<String>>>,
-    }
+    static SHARED: OnceLock<TracingCaptures> = OnceLock::new();
+    SHARED.get_or_init(|| {
+        let span_names = Arc::new(Mutex::new(Vec::new()));
+        let fmt_buffer = Arc::new(Mutex::new(Vec::new()));
 
-    impl<S> tracing_subscriber::Layer<S> for SpanRecorder
-    where
-        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-    {
-        fn on_new_span(
-            &self,
-            attrs: &tracing::span::Attributes<'_>,
-            _id: &tracing::span::Id,
-            _ctx: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            if let Ok(mut guard) = self.observed.lock() {
-                guard.push(attrs.metadata().name().to_string());
-            }
+        let recorder = SpanRecorder {
+            observed: span_names.clone(),
+        };
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_writer(SharedBuf(fmt_buffer.clone()))
+            // Critical: this is what makes the boundary spans visible
+            // to the user in formatted output. Without it the spans
+            // dispatch but the fmt layer renders nothing.
+            .with_span_events(FmtSpan::ENTER | FmtSpan::EXIT)
+            // No colours in the captured buffer — assertions need
+            // plain text.
+            .with_ansi(false);
+
+        // try_init returns Err if a global subscriber already exists;
+        // either way our OnceLock-stored captures are the ones tests
+        // read from. The dispatch result only matters if we won the
+        // install race.
+        let _ = tracing_subscriber::registry()
+            .with(recorder)
+            .with(fmt_layer)
+            .try_init();
+
+        TracingCaptures {
+            span_names,
+            fmt_buffer,
         }
-    }
+    })
+}
 
-    static SHARED_RECORDER: OnceLock<Arc<Mutex<Vec<String>>>> = OnceLock::new();
-
-    let observed = SHARED_RECORDER
-        .get_or_init(|| {
-            let recorder = SpanRecorder::default();
-            let observed = recorder.observed.clone();
-            // try_init returns Err if a global subscriber already
-            // exists; either way, our OnceLock-stored Arc is the one
-            // we'll read from when the test asserts. The dispatch
-            // result here only matters if we won the install race.
-            let _ = tracing_subscriber::registry()
-                .with(recorder)
-                .try_init();
-            observed
-        })
-        .clone();
-
+fn trigger_evaluate_for_tracing() {
     let mut embedded = Embedded::new();
     embedded
         .register_module(
@@ -319,10 +383,16 @@ fn evaluation_emits_expected_phase_spans() {
             ..EvaluateArgs::default()
         })
         .expect("evaluate");
+}
 
-    let snapshot = observed.lock().unwrap().clone();
+#[test]
+fn evaluation_emits_expected_phase_spans() {
+    let captures = ensure_tracing_init();
+    trigger_evaluate_for_tracing();
+
+    let snapshot = captures.span_names.lock().unwrap().clone();
     // The recorder accumulates spans from every test in this binary
-    // (it's a process-wide subscriber installed once via OnceLock).
+    // (process-wide subscriber installed via OnceLock).
     // Asserting *presence* in the full snapshot is sufficient — every
     // evaluate() call exercises the same four spans, so concurrent
     // tests can only add more entries, never remove ours.
@@ -337,6 +407,53 @@ fn evaluation_emits_expected_phase_spans() {
             "expected span {required:?} not observed; got: {snapshot:?}"
         );
     }
+}
+
+/// User-observable companion to `evaluation_emits_expected_phase_spans`.
+///
+/// Where the sibling test asks "did the dispatch layer receive the
+/// spans?", this one asks "did the fmt layer render anything a user
+/// would see on stderr?". They check different layers of the same
+/// pipeline. Both are needed because the dispatch layer can be
+/// correct while the fmt layer is silent — see the silent-spans bug
+/// caught in kcl-lang commit `108292b6`, where the original Phase 6b
+/// span regression test passed but `KCL_LOG=info kcl run foo.k` was
+/// silent on the boundary spans because the fmt subscriber config
+/// lacked `with_span_events(...)`.
+///
+/// This test would catch the same class of bug at the test layer
+/// rather than waiting for someone to actually run the CLI.
+#[test]
+fn evaluation_emits_spans_visible_in_fmt_output() {
+    let captures = ensure_tracing_init();
+    trigger_evaluate_for_tracing();
+
+    let buf = captures.fmt_buffer.lock().unwrap().clone();
+    let output = String::from_utf8(buf).expect("fmt output should be UTF-8");
+
+    // Same presence-not-exclusivity argument as the sibling test:
+    // every evaluate() call writes the same four spans, so other
+    // tests in the binary can only add lines.
+    for required in &[
+        "kcl_embedded_evaluate",
+        "kcl_parse",
+        "kcl_resolve",
+        "kcl_evaluate",
+    ] {
+        assert!(
+            output.contains(required),
+            "expected fmt output to contain {required:?}; got:\n{output}"
+        );
+    }
+    // ENTER/EXIT markers are what `with_span_events` enables — assert
+    // their presence to lock down that config too. Without them the
+    // spans would still appear via the inheritance chain (each event
+    // names its parent span) but with no lifecycle markers, which is
+    // exactly the regression mode this test guards against.
+    assert!(
+        output.contains("enter") || output.contains("exit"),
+        "expected enter/exit lifecycle markers in fmt output; got:\n{output}"
+    );
 }
 
 /// Phase 6a step 4 eliminated the PanicInfo → JSON → string → parse →
