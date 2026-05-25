@@ -9,7 +9,7 @@
 //! typed Rust. No JSON. No hand-written struct definitions.
 
 use kcl_embed::{Embedded, EvaluateArgs};
-use kcl_rust_codegen_fixture::{Disk, DiskStorageClass, Vm, VmState};
+use kcl_rust_codegen_fixture::{Action, Disk, DiskStorageClass, Vm, VmState};
 use kcl_runtime::ValueRef;
 
 const VM_PROGRAM: &str = include_str!("../schemas.k");
@@ -262,4 +262,217 @@ fn disk_type_standalone_roundtrip() {
         .expect("try_into");
     assert_eq!(disk.size_gb, 250);
     assert_eq!(disk.label, Some("data".to_string()));
+}
+
+// --- Phase 4B tagged-enum codegen end-to-end ---
+//
+// The `Action` schema in `schemas.k` is annotated:
+//
+//   # @rust: tagged_enum(discriminator = "kind")
+//   schema Action:
+//       kind: "noop" | "log" | "exec"
+//       note?: str          # @rust: shared
+//       message?: str       # @rust: variant("log")
+//       cmd?: str           # @rust: variant("exec")
+//       timeout_s?: int = 30  # @rust: variant("exec")
+//
+// Codegen produces a Rust `enum Action { Noop {...}, Log {...},
+// Exec {...} }` with the variant-required fields collapsed from
+// Option<T> to T (since the schema's check block — implicit here
+// since each field is named after its variant, but the discriminator
+// alone is enough for codegen to infer the assignment via the
+// annotations) enforces presence.
+//
+// These tests exercise each variant through the embed pipeline.
+
+/// `kind = "noop"` produces an `Action::Noop`. The Noop variant has
+/// no variant-specific fields; only the shared `note` field appears.
+#[test]
+fn tagged_enum_noop_variant_roundtrip() {
+    let mut embedded = Embedded::new();
+    embedded
+        .register_module("schemas", VM_PROGRAM)
+        .expect("register");
+    let ready = embedded.build();
+
+    let outcome = ready
+        .evaluate(EvaluateArgs {
+            main_source: concat!(
+                "import schemas\n",
+                "a = schemas.Action {kind = \"noop\", note = \"placeholder\"}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        })
+        .expect("evaluate");
+
+    let action: Action = (&outcome.value.dict_get_value("a").unwrap())
+        .try_into()
+        .expect("Action try_from");
+    match action {
+        Action::Noop { note } => {
+            assert_eq!(note, Some("placeholder".to_string()));
+        }
+        other => panic!("expected Action::Noop, got {other:?}"),
+    }
+}
+
+/// `kind = "log"` produces an `Action::Log`. The `message` field is
+/// variant-required (collapsed from `message?: str`) so it's `String`,
+/// not `Option<String>`, on the variant.
+#[test]
+fn tagged_enum_log_variant_required_field_is_non_optional() {
+    let mut embedded = Embedded::new();
+    embedded
+        .register_module("schemas", VM_PROGRAM)
+        .expect("register");
+    let ready = embedded.build();
+
+    let outcome = ready
+        .evaluate(EvaluateArgs {
+            main_source: concat!(
+                "import schemas\n",
+                "a = schemas.Action {kind = \"log\", message = \"hello\"}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        })
+        .expect("evaluate");
+
+    let action: Action = (&outcome.value.dict_get_value("a").unwrap())
+        .try_into()
+        .expect("Action try_from");
+    match action {
+        Action::Log { message, note } => {
+            // `message` is `String`, not `Option<String>` — the
+            // variant-required collapse from `message?: str`.
+            assert_eq!(message, "hello");
+            assert_eq!(note, None);
+        }
+        other => panic!("expected Action::Log, got {other:?}"),
+    }
+}
+
+/// `kind = "exec"` produces an `Action::Exec`. Exec has two
+/// variant-specific fields: `cmd` (required-in-variant) and
+/// `timeout_s` (has-default, populated by the VM).
+#[test]
+fn tagged_enum_exec_variant_with_defaulted_field() {
+    let mut embedded = Embedded::new();
+    embedded
+        .register_module("schemas", VM_PROGRAM)
+        .expect("register");
+    let ready = embedded.build();
+
+    let outcome = ready
+        .evaluate(EvaluateArgs {
+            main_source: concat!(
+                "import schemas\n",
+                "a = schemas.Action {\n",
+                "    kind = \"exec\"\n",
+                "    cmd = \"/bin/true\"\n",
+                "    note = \"sanity check\"\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        })
+        .expect("evaluate");
+
+    let action: Action = (&outcome.value.dict_get_value("a").unwrap())
+        .try_into()
+        .expect("Action try_from");
+    match action {
+        Action::Exec {
+            cmd,
+            timeout_s,
+            note,
+        } => {
+            assert_eq!(cmd, "/bin/true");
+            // Default value flows through codegen unchanged.
+            assert_eq!(timeout_s, 30);
+            assert_eq!(note, Some("sanity check".to_string()));
+        }
+        other => panic!("expected Action::Exec, got {other:?}"),
+    }
+}
+
+/// A list of mixed-variant Actions round-trips: each ValueRef inside
+/// the Vec gets dispatched to the right variant by its discriminator.
+#[test]
+fn tagged_enum_list_of_actions_dispatches_per_variant() {
+    let mut embedded = Embedded::new();
+    embedded
+        .register_module("schemas", VM_PROGRAM)
+        .expect("register");
+    let ready = embedded.build();
+
+    let outcome = ready
+        .evaluate(EvaluateArgs {
+            main_source: concat!(
+                "import schemas\n",
+                "actions = [\n",
+                "    schemas.Action {kind = \"noop\"}\n",
+                "    schemas.Action {kind = \"log\", message = \"step 2\"}\n",
+                "    schemas.Action {kind = \"exec\", cmd = \"true\", timeout_s = 5}\n",
+                "]\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        })
+        .expect("evaluate");
+
+    let list_ref = outcome.value.dict_get_value("actions").unwrap();
+    assert!(list_ref.is_list());
+    let list = list_ref.as_list_ref();
+    let actions: Vec<Action> = list
+        .values
+        .iter()
+        .map(|v| Action::try_from(v).expect("each Action try_from"))
+        .collect();
+
+    assert!(matches!(actions[0], Action::Noop { .. }));
+    match &actions[1] {
+        Action::Log { message, .. } => assert_eq!(message, "step 2"),
+        other => panic!("expected Log, got {other:?}"),
+    }
+    match &actions[2] {
+        Action::Exec { cmd, timeout_s, .. } => {
+            assert_eq!(cmd, "true");
+            assert_eq!(*timeout_s, 5);
+        }
+        other => panic!("expected Exec, got {other:?}"),
+    }
+}
+
+/// Codegen-time drift: a ValueRef whose `kind` field is a string not
+/// in the declared union surfaces as `Err` from TryFrom rather than
+/// being silently mishandled. The error message names the unexpected
+/// value and lists the valid set.
+#[test]
+fn tagged_enum_unknown_discriminator_surfaces_as_err() {
+    let mut embedded = Embedded::new();
+    embedded
+        .register_module("schemas", VM_PROGRAM)
+        .expect("register");
+    let ready = embedded.build();
+
+    // Construct a value with an invalid discriminator. We can't get
+    // KCL to produce this because the schema's union type-check
+    // would reject it; instead we build the ValueRef directly to
+    // simulate codegen drift from the schema. Match the
+    // `ValueRef::dict(Some(&[(k, v)...]))` pattern used by the
+    // sibling drift tests above.
+    let kind = ValueRef::str("unknown_variant");
+    let dict = ValueRef::dict(Some(&[("kind", &kind)]));
+
+    let err = Action::try_from(&dict).expect_err("invalid discriminator");
+    assert!(
+        err.contains("unknown_variant"),
+        "error should name the offending value: {err}"
+    );
+    assert!(
+        err.contains("noop") && err.contains("log") && err.contains("exec"),
+        "error should list valid variants: {err}"
+    );
 }
