@@ -1707,10 +1707,29 @@ impl<'ctx> Evaluator<'ctx> {
                     }
                     _ => None,
                 };
-                // Store a local variable for every entry key.
+                // A bare identifier on the LHS of a config entry is
+                // ALWAYS the literal field name, regardless of whether
+                // a local variable with the same name is in scope.
+                // (Previously this branch was guarded by `!is_local_var(name)`
+                // — i.e. an identifier-keyed entry whose name happened
+                // to also be a local var would be walked as an
+                // expression and use the var's *value* as a dynamic
+                // key. That made lambda parameters silently shadow
+                // schema field names with the same name: e.g.
+                //
+                //     make_point = lambda x: int, y: int -> Point {
+                //         {x = x, y = y}   # → dict keyed by values of x,y
+                //                          # → fails schema coercion
+                //     }
+                //
+                // which Tilley's helpers.k tripped over. KCL already
+                // has explicit subscript syntax for dynamic keys
+                // (`{[expr] = value}`, handled in the Subscript arm
+                // of `optional_name` above); the local-var shadow
+                // exception conflated two distinct grammar forms.)
                 let key = match &optional_name {
-                    Some(name) if !self.is_local_var(name) => self.string_value(name),
-                    _ => self.walk_expr(key_node)?,
+                    Some(name) => self.string_value(name),
+                    None => self.walk_expr(key_node)?,
                 };
                 self.dict_insert(
                     &mut config_value,
