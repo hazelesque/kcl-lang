@@ -421,7 +421,10 @@ fn lift_to_tagged_enum(
             FieldAnnotation::Shared => {
                 shared_fields.push(field.clone());
             }
-            FieldAnnotation::Variant(variant_name) => {
+            FieldAnnotation::Variant {
+                name: variant_name,
+                is_variant_optional,
+            } => {
                 let bucket = variant_fields
                     .iter_mut()
                     .find(|(v, _)| v == variant_name)
@@ -432,13 +435,19 @@ fn lift_to_tagged_enum(
                             schema.name, field.name, variant_name, lifted_variants,
                         ))
                     })?;
-                // Within an assigned variant the field is required
-                // (the schema's check: block enforces this). Collapse
-                // optional → not-optional so the generated variant
-                // carries `T` instead of `Option<T>`. Defaulted fields
-                // (has_default) stay `T` too — the VM populates them.
+                // Default: within an assigned variant the field is
+                // required (the schema's check: block enforces this),
+                // so collapse `?:` → non-Option. The
+                // `variant("X", optional)` form opts out of the
+                // collapse: keep Option<T> when the field is
+                // genuinely optional within the variant (e.g. the
+                // contains? field on the File variant of Tilley's
+                // TestAssertion). Defaulted fields (has_default) stay
+                // as `T` regardless — the VM populates the default.
                 let mut variant_field = field.clone();
-                variant_field.optional = false;
+                if !*is_variant_optional {
+                    variant_field.optional = false;
+                }
                 bucket.1.push(variant_field);
             }
         }

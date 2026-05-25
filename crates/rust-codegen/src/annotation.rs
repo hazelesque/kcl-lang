@@ -58,8 +58,23 @@ pub(crate) struct TaggedEnumAnnotation {
 /// parse time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FieldAnnotation {
-    /// `# @rust: variant("X")` — field belongs to variant X only.
-    Variant(String),
+    /// `# @rust: variant("X")` or `# @rust: variant("X", optional)`.
+    /// Field belongs to variant X only. The `is_variant_optional`
+    /// flag controls how the field's KCL-level optionality maps to
+    /// Rust:
+    ///
+    /// - `false` (default — bare `variant("X")`): the field is
+    ///   *required within variant X* (the schema's check: block
+    ///   enforces it), so codegen collapses `field?: T` to `T` in
+    ///   the variant.
+    /// - `true` (`variant("X", optional)`): the field remains
+    ///   *optional within variant X*, so codegen emits `Option<T>`.
+    ///   Use this when the KCL check block doesn't require the
+    ///   field for the variant.
+    Variant {
+        name: String,
+        is_variant_optional: bool,
+    },
     /// `# @rust: shared` — field appears in every variant.
     Shared,
 }
@@ -105,7 +120,7 @@ pub(crate) fn parse_rust_annotation(
         })));
     }
 
-    // Field-level: `variant("X")`
+    // Field-level: `variant("X")` or `variant("X", optional)`
     if let Some(rest) = body.strip_prefix("variant(") {
         let inner = rest
             .strip_suffix(')')
@@ -115,12 +130,31 @@ pub(crate) fn parse_rust_annotation(
                 ))
             })?
             .trim();
-        let name = parse_string_literal(inner).ok_or_else(|| {
+        // Split on the first comma (if any). The grammar is
+        // intentionally narrow: the name is a quoted string; the
+        // optional second arg is the literal identifier `optional`.
+        let (name_part, modifier_part) = match inner.split_once(',') {
+            Some((a, b)) => (a.trim(), Some(b.trim())),
+            None => (inner, None),
+        };
+        let name = parse_string_literal(name_part).ok_or_else(|| {
             CodegenError::InvalidAnnotation(format!(
-                "variant: expected `variant(\"<name>\")`, got {comment_text:?}"
+                "variant: expected `variant(\"<name>\")` or `variant(\"<name>\", optional)`, got {comment_text:?}"
             ))
         })?;
-        return Ok(Some(RawAnnotation::Field(FieldAnnotation::Variant(name))));
+        let is_variant_optional = match modifier_part {
+            None => false,
+            Some("optional") => true,
+            Some(other) => {
+                return Err(CodegenError::InvalidAnnotation(format!(
+                    "variant: unknown modifier {other:?} (expected `optional` or nothing) in {comment_text:?}"
+                )));
+            }
+        };
+        return Ok(Some(RawAnnotation::Field(FieldAnnotation::Variant {
+            name,
+            is_variant_optional,
+        })));
     }
 
     // Field-level: `shared`
@@ -194,9 +228,40 @@ mod tests {
             .expect("parse")
             .expect("recognised");
         match anno {
-            RawAnnotation::Field(FieldAnnotation::Variant(n)) => assert_eq!(n, "command"),
+            RawAnnotation::Field(FieldAnnotation::Variant {
+                name,
+                is_variant_optional,
+            }) => {
+                assert_eq!(name, "command");
+                assert!(!is_variant_optional);
+            }
             other => panic!("expected Variant, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_field_variant_optional_modifier() {
+        let anno = parse_rust_annotation("# @rust: variant(\"file\", optional)")
+            .expect("parse")
+            .expect("recognised");
+        match anno {
+            RawAnnotation::Field(FieldAnnotation::Variant {
+                name,
+                is_variant_optional,
+            }) => {
+                assert_eq!(name, "file");
+                assert!(is_variant_optional, "modifier should set optional flag");
+            }
+            other => panic!("expected Variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_variant_modifier() {
+        let err = parse_rust_annotation("# @rust: variant(\"file\", garbage)")
+            .expect_err("unknown modifier should error");
+        let msg = err.to_string();
+        assert!(msg.contains("garbage"), "msg should name the modifier: {msg}");
     }
 
     #[test]
