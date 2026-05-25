@@ -15,7 +15,9 @@ use kcl_sema::resolver::scope::ProgramScope;
 use kcl_sema::ty::{SchemaType, TypeKind};
 
 use crate::CodegenError;
-use crate::annotation::{RawAnnotation, SchemaAnnotations, parse_rust_annotation};
+use crate::annotation::{
+    FieldAnnotation, RawAnnotation, SchemaAnnotations, parse_rust_annotation,
+};
 
 /// Top-level codegen IR for a single KCL source file.
 #[derive(Debug, Clone, Default)]
@@ -27,6 +29,58 @@ pub struct ModuleIR {
     /// entry here, with a name derived from `<SchemaName><FieldName>`
     /// (PascalCase concat).
     pub enums: Vec<EnumIR>,
+    /// Tagged-enum schemas lifted from `schemas` via the Phase 4B
+    /// `# @rust: tagged_enum(...)` annotation. Distinct from `enums`
+    /// (which holds string-literal-union lifts); these carry
+    /// per-variant field lists and codegen as a Rust enum with
+    /// payload variants rather than C-style unit variants.
+    pub tagged_enums: Vec<TaggedEnumIR>,
+}
+
+/// Codegen IR for a schema that's been promoted to a tagged Rust
+/// enum via the `# @rust: tagged_enum(discriminator = "...")`
+/// annotation. The discriminator field's string-literal-union values
+/// become the enum's variants; each non-discriminator field is
+/// assigned to a variant (`# @rust: variant("X")`) or appears in
+/// every variant (`# @rust: shared`).
+#[derive(Debug, Clone)]
+pub struct TaggedEnumIR {
+    /// Generated Rust type name — the schema's name verbatim.
+    pub name: String,
+    /// KCL source file the schema was declared in. Surfaces in
+    /// rustdoc.
+    pub source_file: String,
+    /// Source line of the `schema X:` declaration.
+    pub source_line: u64,
+    /// The schema's docstring, forwarded to the generated enum's
+    /// top-level rustdoc.
+    pub doc: String,
+    /// Name of the discriminator field (the field whose
+    /// string-literal-union values enumerate the variants). The
+    /// field itself is *not* a member of any variant — its value
+    /// determines which variant is constructed.
+    pub discriminator: String,
+    /// One entry per discriminator literal, in source order.
+    pub variants: Vec<TaggedEnumVariantIR>,
+    /// Fields that appear in every variant (annotated
+    /// `# @rust: shared`). Their `Option`-ness and default-ness
+    /// behave the same as in struct codegen.
+    pub shared_fields: Vec<FieldIR>,
+}
+
+/// One variant of a [`TaggedEnumIR`].
+#[derive(Debug, Clone)]
+pub struct TaggedEnumVariantIR {
+    /// PascalCased Rust variant name (e.g. `"command"` → `Command`).
+    pub rust_name: String,
+    /// The discriminator literal as it appears in KCL source.
+    pub kcl_literal: String,
+    /// Fields assigned to this variant via `# @rust: variant("X")`.
+    /// All have their `optional` collapsed to `false` (within an
+    /// assigned variant, the KCL check block ensures the field is
+    /// present, so codegen emits it as a non-`Option<T>`). Fields
+    /// with `has_default` stay as `T` (default flows from VM).
+    pub fields: Vec<FieldIR>,
 }
 
 /// Codegen IR for a single KCL schema. Produced by [`extract_schemas`]
@@ -232,9 +286,191 @@ pub(crate) fn extract_module(
         module.schemas.push(schema_ir);
     }
 
+    // Phase 4B promotion: schemas annotated with `tagged_enum` get
+    // moved out of `module.schemas` into `module.tagged_enums` with
+    // their fields rebucketed by variant. Done after all schemas
+    // have been extracted so the lifted-enum-for-the-discriminator
+    // can also be cleaned up from `module.enums`.
+    promote_tagged_enum_schemas(&mut module)?;
+
     detect_lifted_enum_collisions(&module)?;
 
     Ok(module)
+}
+
+/// Walk `module.schemas`, lift any with a `tagged_enum` annotation
+/// into `module.tagged_enums`, and remove the now-redundant lifted
+/// string-literal-union for the discriminator field from
+/// `module.enums`.
+///
+/// Validation:
+/// - The named discriminator field must exist on the schema.
+/// - It must be a [`FieldKind::StrEnum`] (string-literal union).
+/// - Every non-discriminator field must have either `variant(X)` or
+///   `shared` annotation.
+/// - Every `variant("X")` name must refer to a declared discriminator
+///   literal.
+fn promote_tagged_enum_schemas(module: &mut ModuleIR) -> Result<(), CodegenError> {
+    // Indices in module.schemas that should be lifted, in reverse
+    // order so the swap_remove inside the loop doesn't perturb the
+    // indices we haven't visited yet.
+    let to_lift: Vec<usize> = module
+        .schemas
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.annotations.tagged_enum.is_some())
+        .map(|(i, _)| i)
+        .collect();
+
+    // Lift in reverse so swap_remove indices stay valid.
+    for idx in to_lift.into_iter().rev() {
+        let schema = module.schemas.swap_remove(idx);
+        let tagged = lift_to_tagged_enum(schema, module)?;
+        module.tagged_enums.push(tagged);
+    }
+
+    // Re-sort schemas back into source-declaration order: swap_remove
+    // doesn't preserve order, but the rest of the codegen (and
+    // generated rustdoc citing source lines) reads better when the
+    // emission order matches source order.
+    module.schemas.sort_by_key(|s| s.source_line);
+    // Same for tagged enums.
+    module.tagged_enums.sort_by_key(|t| t.source_line);
+
+    Ok(())
+}
+
+/// Convert one [`SchemaIR`] (with a tagged_enum annotation) into a
+/// [`TaggedEnumIR`]. Removes the lifted enum that was created for
+/// the discriminator field from `module.enums` since that
+/// information is now embedded in the tagged enum's variant set.
+fn lift_to_tagged_enum(
+    schema: SchemaIR,
+    module: &mut ModuleIR,
+) -> Result<TaggedEnumIR, CodegenError> {
+    let discriminator = schema
+        .annotations
+        .tagged_enum
+        .as_ref()
+        .expect("promotion only invoked when tagged_enum annotation present")
+        .discriminator
+        .clone();
+
+    // Find the discriminator field by name. It must be a lifted
+    // string-literal-union (StrEnum) so the variants are known.
+    let disc_field = schema
+        .fields
+        .iter()
+        .find(|f| f.name == discriminator)
+        .ok_or_else(|| {
+            CodegenError::InvalidAnnotation(format!(
+                "schema {}: tagged_enum discriminator `{}` is not a field",
+                schema.name, discriminator,
+            ))
+        })?;
+    let disc_enum_name = match &disc_field.kind {
+        FieldKind::StrEnum(name) => name.clone(),
+        other => {
+            return Err(CodegenError::InvalidAnnotation(format!(
+                "schema {}: tagged_enum discriminator `{}` must be a string-literal \
+                 union (e.g. `\"a\" | \"b\"`), got {}",
+                schema.name,
+                discriminator,
+                other.describe(),
+            )));
+        }
+    };
+
+    // Pull the variant literals out of the EnumIR. We *clone* before
+    // any removal so the variant list is available even after the
+    // EnumIR is removed from module.enums.
+    let lifted_idx = module
+        .enums
+        .iter()
+        .position(|e| e.rust_name == disc_enum_name)
+        .ok_or_else(|| {
+            CodegenError::Internal(format!(
+                "schema {}: discriminator field had StrEnum kind referring to `{}` \
+                 but no matching lifted enum was found in module.enums",
+                schema.name, disc_enum_name,
+            ))
+        })?;
+    let lifted_variants = module.enums[lifted_idx].variants.clone();
+
+    // Bucket non-discriminator fields into per-variant lists and a
+    // shared list. Reject fields without annotation. Validate every
+    // variant("X") name matches a declared literal.
+    let mut variant_fields: Vec<(String, Vec<FieldIR>)> = lifted_variants
+        .iter()
+        .map(|v| (v.clone(), Vec::new()))
+        .collect();
+    let mut shared_fields = Vec::new();
+
+    for field in &schema.fields {
+        if field.name == discriminator {
+            continue;
+        }
+        let anno = schema.annotations.fields.get(&field.name).ok_or_else(|| {
+            CodegenError::InvalidAnnotation(format!(
+                "schema {}.{}: tagged_enum requires every non-discriminator field to \
+                 carry either `# @rust: variant(\"<name>\")` or `# @rust: shared`",
+                schema.name, field.name,
+            ))
+        })?;
+        match anno {
+            FieldAnnotation::Shared => {
+                shared_fields.push(field.clone());
+            }
+            FieldAnnotation::Variant(variant_name) => {
+                let bucket = variant_fields
+                    .iter_mut()
+                    .find(|(v, _)| v == variant_name)
+                    .ok_or_else(|| {
+                        CodegenError::InvalidAnnotation(format!(
+                            "schema {}.{}: variant(\"{}\") does not match any \
+                             discriminator literal; declared variants are {:?}",
+                            schema.name, field.name, variant_name, lifted_variants,
+                        ))
+                    })?;
+                // Within an assigned variant the field is required
+                // (the schema's check: block enforces this). Collapse
+                // optional → not-optional so the generated variant
+                // carries `T` instead of `Option<T>`. Defaulted fields
+                // (has_default) stay `T` too — the VM populates them.
+                let mut variant_field = field.clone();
+                variant_field.optional = false;
+                bucket.1.push(variant_field);
+            }
+        }
+    }
+
+    // Build the TaggedEnumVariantIR list, preserving the declaration
+    // order of the discriminator literals.
+    let variants: Vec<TaggedEnumVariantIR> = variant_fields
+        .into_iter()
+        .map(|(kcl_literal, fields)| TaggedEnumVariantIR {
+            rust_name: pascal_case(&kcl_literal),
+            kcl_literal,
+            fields,
+        })
+        .collect();
+
+    // Drop the now-redundant lifted enum for the discriminator field.
+    // After lifting, the variant set is encoded in the TaggedEnumIR
+    // itself; emitting a separate `pub enum TestAssertionType { ... }`
+    // would pollute the namespace and confuse consumers about which
+    // is "the" tagged-enum type.
+    module.enums.swap_remove(lifted_idx);
+
+    Ok(TaggedEnumIR {
+        name: schema.name,
+        source_file: schema.source_file,
+        source_line: schema.source_line,
+        doc: schema.doc,
+        discriminator,
+        variants,
+        shared_fields,
+    })
 }
 
 /// Per-schema source positions captured from the AST, indexed by

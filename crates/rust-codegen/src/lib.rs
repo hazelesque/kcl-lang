@@ -291,16 +291,13 @@ mod tests {
         }
     }
 
-    /// Phase 4B step 1: schema-level `# @rust: tagged_enum(...)`
+    /// Phase 4B step 1+2: schema-level `# @rust: tagged_enum(...)`
     /// and per-field `# @rust: variant(...)` / `# @rust: shared`
-    /// annotations are parsed and attached to the IR.
-    ///
-    /// This test only verifies *parsing and attachment* — codegen
-    /// still emits the flat-struct shape at this step. Step 2
-    /// wires the annotations into emission.
+    /// annotations are parsed AND the schema is promoted to a
+    /// `TaggedEnumIR` (lifted out of `module.schemas` into
+    /// `module.tagged_enums`).
     #[test]
-    fn tagged_enum_annotations_are_attached_to_ir() {
-        use crate::annotation::FieldAnnotation;
+    fn tagged_enum_annotations_produce_tagged_enum_ir() {
         // Two-space indent in the source matters: KCL's parser
         // tracks columns, and the trailing-comment matcher uses
         // line equality. The annotation comments live on the same
@@ -314,39 +311,164 @@ mod tests {
             "    service?: str  # @rust: variant(\"service\")\n",
         );
         let module = analyse_inline_source(src).expect("analyse");
-        assert_eq!(module.schemas.len(), 1);
-        let s = &module.schemas[0];
-        let tagged = s
-            .annotations
-            .tagged_enum
-            .as_ref()
-            .expect("tagged_enum annotation should be attached");
-        assert_eq!(tagged.discriminator, "type");
-        assert!(
-            matches!(s.annotations.fields.get("description"), Some(FieldAnnotation::Shared)),
-            "description should be marked shared; got {:?}",
-            s.annotations.fields.get("description"),
+        // The annotated schema was promoted out of schemas into
+        // tagged_enums.
+        assert_eq!(module.schemas.len(), 0, "annotated schema should be lifted");
+        assert_eq!(module.tagged_enums.len(), 1, "expected one tagged enum");
+        // The lifted enum for the discriminator field is also gone
+        // from module.enums — the variant set is now embedded in the
+        // TaggedEnumIR.
+        assert_eq!(
+            module.enums.len(),
+            0,
+            "discriminator's lifted str-enum should be removed; got: {:?}",
+            module.enums
         );
-        assert!(
-            matches!(
-                s.annotations.fields.get("command"),
-                Some(FieldAnnotation::Variant(v)) if v == "command",
-            ),
-            "command should be marked variant(\"command\"); got {:?}",
-            s.annotations.fields.get("command"),
+
+        let t = &module.tagged_enums[0];
+        assert_eq!(t.name, "TestAssertion");
+        assert_eq!(t.discriminator, "type");
+        assert_eq!(t.variants.len(), 2);
+        // Variant order follows the discriminator literal's source
+        // order in the KCL union.
+        assert_eq!(t.variants[0].kcl_literal, "command");
+        assert_eq!(t.variants[0].rust_name, "Command");
+        assert_eq!(t.variants[0].fields.len(), 1);
+        assert_eq!(t.variants[0].fields[0].name, "command");
+        // Within an assigned variant the field is required (the
+        // schema's check block enforces this), so the optional flag
+        // is collapsed.
+        assert!(!t.variants[0].fields[0].optional);
+        assert_eq!(t.variants[1].kcl_literal, "service");
+        assert_eq!(t.variants[1].rust_name, "Service");
+
+        // Shared fields appear on every variant.
+        assert_eq!(t.shared_fields.len(), 1);
+        assert_eq!(t.shared_fields[0].name, "description");
+        // The shared optional stays Option<T> — it's genuinely
+        // optional within every variant.
+        assert!(t.shared_fields[0].optional);
+    }
+
+    /// Codegen of a tagged-enum schema emits a Rust `enum` and a
+    /// `TryFrom<&ValueRef>` impl that dispatches by discriminator.
+    #[test]
+    fn tagged_enum_emits_rust_enum_and_dispatch() {
+        let src = concat!(
+            "# @rust: tagged_enum(discriminator = \"type\")\n",
+            "schema TestAssertion:\n",
+            "    type: \"command\" | \"service\"\n",
+            "    description?: str  # @rust: shared\n",
+            "    command?: str  # @rust: variant(\"command\")\n",
+            "    service?: str  # @rust: variant(\"service\")\n",
         );
+        let out = generate_to_string(src).expect("generate");
+        // Enum definition with payload variants
         assert!(
-            matches!(
-                s.annotations.fields.get("service"),
-                Some(FieldAnnotation::Variant(v)) if v == "service",
-            ),
-            "service should be marked variant(\"service\"); got {:?}",
-            s.annotations.fields.get("service"),
+            out.contains("pub enum TestAssertion {"),
+            "expected `pub enum TestAssertion`; got:\n{out}"
         );
-        // The discriminator field itself should NOT have a variant
-        // annotation (annotation comment on its line would be a
-        // user error; here we just confirm absence is fine).
-        assert!(s.annotations.fields.get("type").is_none());
+        assert!(out.contains("Command {"), "expected Command variant");
+        assert!(out.contains("Service {"), "expected Service variant");
+        // Variant-required fields are non-Option (collapsed from
+        // KCL's optional declaration).
+        assert!(
+            out.contains("command: String,"),
+            "command field should be non-optional in Command variant"
+        );
+        // Shared optional fields stay Option<T>.
+        assert!(
+            out.contains("description: Option<String>,"),
+            "description should be Option<String>"
+        );
+        // TryFrom reads the discriminator and dispatches.
+        assert!(out.contains("impl TryFrom<&kcl_runtime::ValueRef> for TestAssertion"));
+        assert!(
+            out.contains("\"command\" =>"),
+            "TryFrom should match on discriminator literal"
+        );
+        assert!(out.contains("Ok(TestAssertion::Command {"));
+        // No flat struct emission for the tagged-enum schema.
+        assert!(
+            !out.contains("pub struct TestAssertion {"),
+            "tagged-enum schema should NOT emit a flat struct"
+        );
+        // No separate lifted enum for the discriminator either.
+        assert!(
+            !out.contains("pub enum TestAssertionType {"),
+            "discriminator's lifted enum should be elided"
+        );
+    }
+
+    /// Missing per-field annotation on a tagged_enum schema errors
+    /// loudly — the consumer must be explicit about which variant
+    /// each field belongs to.
+    #[test]
+    fn tagged_enum_missing_field_annotation_errors() {
+        let src = concat!(
+            "# @rust: tagged_enum(discriminator = \"type\")\n",
+            "schema TestAssertion:\n",
+            "    type: \"command\" | \"service\"\n",
+            "    command?: str  # @rust: variant(\"command\")\n",
+            // service field intentionally has NO annotation.
+            "    service?: str\n",
+        );
+        let err = generate_to_string(src).expect_err("should fail");
+        match err {
+            CodegenError::InvalidAnnotation(msg) => {
+                assert!(
+                    msg.contains("service") && msg.contains("variant"),
+                    "msg should name the offending field; got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidAnnotation, got: {other:?}"),
+        }
+    }
+
+    /// variant("X") naming a non-existent discriminator literal
+    /// errors with a list of valid variant names.
+    #[test]
+    fn tagged_enum_variant_name_mismatch_errors() {
+        let src = concat!(
+            "# @rust: tagged_enum(discriminator = \"type\")\n",
+            "schema TestAssertion:\n",
+            "    type: \"command\" | \"service\"\n",
+            // Typo: "command" misspelled.
+            "    command?: str  # @rust: variant(\"commandt\")\n",
+            "    service?: str  # @rust: variant(\"service\")\n",
+        );
+        let err = generate_to_string(src).expect_err("should fail");
+        match err {
+            CodegenError::InvalidAnnotation(msg) => {
+                assert!(
+                    msg.contains("commandt") && msg.contains("does not match"),
+                    "msg should name the offending variant; got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidAnnotation, got: {other:?}"),
+        }
+    }
+
+    /// tagged_enum naming a discriminator field that isn't a
+    /// string-literal union errors with an actionable message.
+    #[test]
+    fn tagged_enum_wrong_discriminator_kind_errors() {
+        let src = concat!(
+            "# @rust: tagged_enum(discriminator = \"type\")\n",
+            "schema X:\n",
+            "    type: int\n",
+            "    a: str  # @rust: variant(\"command\")\n",
+        );
+        let err = generate_to_string(src).expect_err("should fail");
+        match err {
+            CodegenError::InvalidAnnotation(msg) => {
+                assert!(
+                    msg.contains("must be a string-literal"),
+                    "msg should explain the constraint; got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidAnnotation, got: {other:?}"),
+        }
     }
 
     /// A schema with no `@rust:` annotations at all should leave

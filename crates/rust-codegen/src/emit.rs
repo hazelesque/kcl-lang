@@ -1,6 +1,9 @@
 //! Emit Rust source text from a [`ModuleIR`].
 
-use crate::ir::{EnumIR, FieldIR, FieldKind, ModuleIR, SchemaIR, escape_rust_keyword, pascal_case};
+use crate::ir::{
+    EnumIR, FieldIR, FieldKind, ModuleIR, SchemaIR, TaggedEnumIR, escape_rust_keyword,
+    pascal_case,
+};
 use crate::CodegenError;
 
 const BANNER: &str = "\
@@ -135,6 +138,10 @@ pub(crate) fn emit_rust_source(module: &ModuleIR) -> Result<String, CodegenError
     out.push_str(HELPERS);
     for e in &module.enums {
         emit_enum(&mut out, e);
+    }
+    for tagged in &module.tagged_enums {
+        emit_tagged_enum(&mut out, tagged);
+        emit_tagged_enum_try_from(&mut out, tagged);
     }
     for schema in &module.schemas {
         emit_struct(&mut out, schema);
@@ -300,6 +307,171 @@ fn emit_try_from(out: &mut String, schema: &SchemaIR) {
     out.push_str("}\n\n");
 }
 
+/// Emit a Rust `enum TaggedX { ... }` definition from a
+/// [`TaggedEnumIR`]. Each variant has its assigned fields plus the
+/// `shared_fields` from the parent. The discriminator field itself
+/// is NOT emitted — the variant tag encodes it.
+fn emit_tagged_enum(out: &mut String, tagged: &TaggedEnumIR) {
+    if !tagged.doc.is_empty() {
+        for line in tagged.doc.lines() {
+            out.push_str("/// ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.push_str(&format!(
+        "/// Generated from `{}` (line {}) — tagged enum lifted via `# @rust: tagged_enum(discriminator = {:?})`.\n",
+        tagged.source_file, tagged.source_line, tagged.discriminator,
+    ));
+    let has_float = tagged
+        .variants
+        .iter()
+        .flat_map(|v| v.fields.iter())
+        .chain(tagged.shared_fields.iter())
+        .any(|f| f.kind.contains_float());
+    if has_float {
+        out.push_str(
+            "/// **Note:** this enum contains `f64` field(s); the derived\n",
+        );
+        out.push_str(
+            "/// `PartialEq` is NaN-aware (`f64::NAN != f64::NAN`).\n",
+        );
+    }
+    out.push_str("#[derive(Debug, Clone, PartialEq)]\n");
+    out.push_str(&format!("pub enum {} {{\n", tagged.name));
+    for variant in &tagged.variants {
+        out.push_str(&format!(
+            "    /// KCL discriminator literal: {:?}\n",
+            variant.kcl_literal,
+        ));
+        out.push_str(&format!("    {} {{\n", variant.rust_name));
+        // Variant-assigned fields first, then shared fields. Stable
+        // ordering matters for pattern-match ergonomics — variant
+        // fields are what's "interesting" per variant.
+        for field in &variant.fields {
+            emit_variant_field_decl(out, field);
+        }
+        for field in &tagged.shared_fields {
+            emit_variant_field_decl(out, field);
+        }
+        out.push_str("    },\n");
+    }
+    out.push_str("}\n\n");
+}
+
+fn emit_variant_field_decl(out: &mut String, field: &FieldIR) {
+    if field.has_default {
+        out.push_str(
+            "        /// Has a default value in the source schema; populated by the KCL VM.\n",
+        );
+    }
+    let rust_ty = field.kind.to_rust_type();
+    let rust_ty = if field.optional {
+        format!("Option<{rust_ty}>")
+    } else {
+        rust_ty
+    };
+    out.push_str(&format!(
+        "        {}: {},\n",
+        escape_rust_keyword(&field.name),
+        rust_ty,
+    ));
+}
+
+/// Emit `impl TryFrom<&ValueRef> for TaggedX`. Reads the
+/// discriminator field, dispatches on its string value, reads each
+/// variant's assigned + shared fields, constructs the matching
+/// variant.
+fn emit_tagged_enum_try_from(out: &mut String, tagged: &TaggedEnumIR) {
+    let name = &tagged.name;
+    let discriminator = &tagged.discriminator;
+
+    out.push_str(&format!(
+        "impl TryFrom<&kcl_runtime::ValueRef> for {name} {{\n"
+    ));
+    out.push_str("    type Error = String;\n");
+    out.push_str(
+        "    /// In a well-formed deployment where (a) codegen was run against the same\n",
+    );
+    out.push_str(
+        "    /// schema source the VM was given, and (b) the VM successfully evaluated the\n",
+    );
+    out.push_str(
+        "    /// user program against that schema (including its `check:` block predicates\n",
+    );
+    out.push_str(
+        "    /// enforcing per-variant required fields), the `Err` branch is unreachable.\n",
+    );
+    out.push_str("    fn try_from(v: &kcl_runtime::ValueRef) -> Result<Self, Self::Error> {\n");
+    out.push_str("        if !v.is_dict() && !v.is_schema() {\n");
+    out.push_str(&format!(
+        "            return Err(format!(\"expected {name} dict/schema, got {{}}\", v.type_str()));\n"
+    ));
+    out.push_str("        }\n");
+    // Read discriminator string from the dict.
+    out.push_str(&format!(
+        "        let __disc = _kcl_codegen_helpers::require(v, \"{discriminator}\", \"{name}\", _kcl_codegen_helpers::from_str)?;\n"
+    ));
+    out.push_str("        match __disc.as_str() {\n");
+    for variant in &tagged.variants {
+        let variant_parent = format!("{}::{}", name, variant.rust_name);
+        out.push_str(&format!("            {:?} => {{\n", variant.kcl_literal));
+        for field in &variant.fields {
+            emit_variant_field_read(out, &variant_parent, field);
+        }
+        for field in &tagged.shared_fields {
+            emit_variant_field_read(out, &variant_parent, field);
+        }
+        out.push_str(&format!(
+            "                Ok({}::{} {{\n",
+            name, variant.rust_name,
+        ));
+        for field in &variant.fields {
+            out.push_str(&format!(
+                "                    {},\n",
+                escape_rust_keyword(&field.name),
+            ));
+        }
+        for field in &tagged.shared_fields {
+            out.push_str(&format!(
+                "                    {},\n",
+                escape_rust_keyword(&field.name),
+            ));
+        }
+        out.push_str("                })\n");
+        out.push_str("            }\n");
+    }
+    let expected_list = tagged
+        .variants
+        .iter()
+        .map(|v| format!("\\\"{}\\\"", v.kcl_literal))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!(
+        "            other => Err(format!(\"unexpected {name}.{discriminator} literal {{other:?}}; expected one of [{expected_list}]\")),\n"
+    ));
+    out.push_str("        }\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+}
+
+fn emit_variant_field_read(out: &mut String, parent: &str, field: &FieldIR) {
+    let conv = emit_conv_closure(&field.kind);
+    let binding = escape_rust_keyword(&field.name);
+    let indent = "                ";
+    if field.optional {
+        out.push_str(&format!(
+            "{indent}let {binding} = _kcl_codegen_helpers::optional(v, \"{}\", \"{}\", {})?;\n",
+            field.name, parent, conv,
+        ));
+    } else {
+        out.push_str(&format!(
+            "{indent}let {binding} = _kcl_codegen_helpers::require(v, \"{}\", \"{}\", {})?;\n",
+            field.name, parent, conv,
+        ));
+    }
+}
+
 fn emit_field_read(out: &mut String, parent: &str, field: &FieldIR) {
     let conv = emit_conv_closure(&field.kind);
     let binding = escape_rust_keyword(&field.name);
@@ -366,6 +538,7 @@ mod tests {
         ModuleIR {
             schemas,
             enums: Vec::new(),
+            tagged_enums: Vec::new(),
         }
     }
 
