@@ -248,7 +248,14 @@ fn emit_struct(out: &mut String, schema: &SchemaIR) {
             out.push_str("    /// resulting `ValueRef`.\n");
         }
         let rust_ty = field.kind.to_rust_type();
-        let rust_ty = if field.optional {
+        // `field?: T = default` (optional WITH a default) emits as
+        // `T`, not `Option<T>`: the KCL VM populates the default
+        // during evaluation, so the field is always present in
+        // the resulting `ValueRef`. Honours the existing rustdoc
+        // contract on `has_default` ("always present in the
+        // resulting ValueRef") that pre-fix-emit didn't actually
+        // enforce.
+        let rust_ty = if field.optional && !field.has_default {
             format!("Option<{rust_ty}>")
         } else {
             rust_ty
@@ -366,7 +373,10 @@ fn emit_variant_field_decl(out: &mut String, field: &FieldIR) {
         );
     }
     let rust_ty = field.kind.to_rust_type();
-    let rust_ty = if field.optional {
+    // See `emit_field_decl`: `optional && !has_default` is the true
+    // "user can omit AND VM won't fill it in" case. Defaulted
+    // optionals stay as `T`.
+    let rust_ty = if field.optional && !field.has_default {
         format!("Option<{rust_ty}>")
     } else {
         rust_ty
@@ -459,7 +469,13 @@ fn emit_variant_field_read(out: &mut String, parent: &str, field: &FieldIR) {
     let conv = emit_conv_closure(&field.kind);
     let binding = escape_rust_keyword(&field.name);
     let indent = "                ";
-    if field.optional {
+    // `optional && !has_default` matches the field-type branch in
+    // `emit_variant_field_decl` — defaulted optionals are emitted
+    // as `T` (not `Option<T>`), so the read site has to use
+    // `require` rather than `optional`. Keep the two branches in
+    // sync; a mismatch produces type-confusion compile errors in
+    // the generated code.
+    if field.optional && !field.has_default {
         out.push_str(&format!(
             "{indent}let {binding} = _kcl_codegen_helpers::optional(v, \"{}\", \"{}\", {})?;\n",
             field.name, parent, conv,
@@ -475,7 +491,9 @@ fn emit_variant_field_read(out: &mut String, parent: &str, field: &FieldIR) {
 fn emit_field_read(out: &mut String, parent: &str, field: &FieldIR) {
     let conv = emit_conv_closure(&field.kind);
     let binding = escape_rust_keyword(&field.name);
-    if field.optional {
+    // See `emit_variant_field_read` for the rationale on the
+    // `&& !field.has_default` clause.
+    if field.optional && !field.has_default {
         out.push_str(&format!(
             "        let {} = _kcl_codegen_helpers::optional(v, \"{}\", \"{}\", {})?;\n",
             binding, field.name, parent, conv
@@ -565,6 +583,20 @@ mod tests {
                     optional: true,
                     has_default: false,
                 },
+                // The defaulted-optional case (`field?: T = default`
+                // in KCL): pre-fix this was emitted as `Option<T>`,
+                // forcing consumers to `.unwrap_or(default)` at every
+                // access site. The KCL VM populates the default
+                // during evaluation, so the field is always present
+                // in the `ValueRef` — codegen collapses it to plain
+                // `T`. Pinned here so a future regression flips the
+                // emission back without anyone noticing.
+                FieldIR {
+                    name: "sudo".into(),
+                    kind: FieldKind::Bool,
+                    optional: true,
+                    has_default: true,
+                },
             ],
         )]);
         let out = emit_rust_source(&module).expect("emit");
@@ -572,6 +604,14 @@ mod tests {
         assert!(out.contains("pub name: String,"));
         assert!(out.contains("pub memory_mb: i64,"));
         assert!(out.contains("pub notes: Option<String>,"));
+        // Defaulted-optional emits as plain `T`, not `Option<T>`,
+        // and the TryFrom reads it via `require` (not `optional`)
+        // because the VM guarantees the field is always present.
+        assert!(out.contains("pub sudo: bool,"));
+        assert!(
+            out.contains("let sudo = _kcl_codegen_helpers::require(v, \"sudo\""),
+            "defaulted-optional field should use `require`, not `optional`:\n{out}"
+        );
         assert!(out.contains("impl TryFrom<&kcl_runtime::ValueRef> for Vm"));
     }
 
