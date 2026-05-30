@@ -825,13 +825,23 @@ fn lift_enum_name(schema_name: &str, field_name: &str) -> String {
     format!("{}{}", schema_name, pascal_case(field_name))
 }
 
-/// PascalCase a snake_case identifier. `audit_id` -> `AuditId`,
-/// `port` -> `Port`. Idempotent on already-PascalCase input.
+/// PascalCase a snake_case / kebab-case / space-separated identifier.
+/// `audit_id` -> `AuditId`, `port` -> `Port`, `virtio-serial` ->
+/// `VirtioSerial`, `foo bar` -> `FooBar`. Idempotent on already-
+/// PascalCase input.
+///
+/// Treats `_`, `-`, and ` ` as word separators (consumed) and
+/// uppercases the next character. Any other non-alphanumeric is
+/// also treated as a separator — Rust enum variants need a valid
+/// identifier and the input here comes from KCL string-literal
+/// unions that the operator wrote, which can legitimately contain
+/// any printable character.
 pub(crate) fn pascal_case(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut next_upper = true;
     for c in s.chars() {
-        if c == '_' {
+        // Word separator: consume, uppercase the next alphanumeric.
+        if !c.is_alphanumeric() {
             next_upper = true;
             continue;
         }

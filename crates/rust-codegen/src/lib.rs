@@ -163,6 +163,47 @@ fn emit_rust_source(module: &ModuleIR) -> Result<String, CodegenError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::pascal_case;
+
+    #[test]
+    fn pascal_case_handles_snake_case() {
+        assert_eq!(pascal_case("audit_id"), "AuditId");
+        assert_eq!(pascal_case("port"), "Port");
+        assert_eq!(pascal_case("a_b_c"), "ABC");
+    }
+
+    #[test]
+    fn pascal_case_handles_kebab_case() {
+        assert_eq!(pascal_case("virtio-serial"), "VirtioSerial");
+        assert_eq!(pascal_case("isa-serial"), "IsaSerial");
+        assert_eq!(pascal_case("foo-bar-baz"), "FooBarBaz");
+    }
+
+    #[test]
+    fn pascal_case_handles_space_separated() {
+        assert_eq!(pascal_case("foo bar"), "FooBar");
+        assert_eq!(pascal_case("hello world again"), "HelloWorldAgain");
+    }
+
+    #[test]
+    fn pascal_case_handles_mixed_separators() {
+        // KCL string-literal-union values can carry any printable
+        // character; the codegen needs a valid Rust identifier out.
+        assert_eq!(pascal_case("foo-bar_baz qux"), "FooBarBazQux");
+        assert_eq!(pascal_case("a.b/c"), "ABC");
+    }
+
+    #[test]
+    fn pascal_case_is_idempotent_on_already_pascal_input() {
+        assert_eq!(pascal_case("VirtioSerial"), "VirtioSerial");
+        assert_eq!(pascal_case("Port"), "Port");
+    }
+
+    #[test]
+    fn pascal_case_preserves_internal_digits() {
+        assert_eq!(pascal_case("v1"), "V1");
+        assert_eq!(pascal_case("ip6_only"), "Ip6Only");
+    }
 
     #[test]
     fn analyse_simple_schema_produces_one_schema_ir() {
