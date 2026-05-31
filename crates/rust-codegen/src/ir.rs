@@ -15,9 +15,7 @@ use kcl_sema::resolver::scope::ProgramScope;
 use kcl_sema::ty::{SchemaType, TypeKind};
 
 use crate::CodegenError;
-use crate::annotation::{
-    FieldAnnotation, RawAnnotation, SchemaAnnotations, parse_rust_annotation,
-};
+use crate::annotation::{FieldAnnotation, RawAnnotation, SchemaAnnotations, parse_rust_annotation};
 
 /// Top-level codegen IR for a single KCL source file.
 #[derive(Debug, Clone, Default)]
@@ -276,13 +274,7 @@ pub(crate) fn extract_module(
         }
         let source_line = obj.start.line;
         let positions = position_index.get(name.as_str());
-        let schema_ir = schema_to_ir(
-            name.clone(),
-            &ty,
-            source_line,
-            positions,
-            &mut module,
-        )?;
+        let schema_ir = schema_to_ir(name.clone(), &ty, source_line, positions, &mut module)?;
         module.schemas.push(schema_ir);
     }
 
@@ -524,11 +516,7 @@ fn build_position_index(program: &Program) -> HashMap<String, SchemaPositions> {
             .collect();
         for stmt_node in &module.body {
             if let Stmt::Schema(schema_stmt) = &stmt_node.node {
-                let positions = build_positions_for_schema(
-                    stmt_node.line,
-                    schema_stmt,
-                    &comments,
-                );
+                let positions = build_positions_for_schema(stmt_node.line, schema_stmt, &comments);
                 out.insert(schema_stmt.name.node.clone(), positions);
             }
         }

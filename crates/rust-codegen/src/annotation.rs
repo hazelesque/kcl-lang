@@ -261,7 +261,10 @@ mod tests {
         let err = parse_rust_annotation("# @rust: variant(\"file\", garbage)")
             .expect_err("unknown modifier should error");
         let msg = err.to_string();
-        assert!(msg.contains("garbage"), "msg should name the modifier: {msg}");
+        assert!(
+            msg.contains("garbage"),
+            "msg should name the modifier: {msg}"
+        );
     }
 
     #[test]
@@ -269,7 +272,10 @@ mod tests {
         let anno = parse_rust_annotation("# @rust: shared")
             .expect("parse")
             .expect("recognised");
-        assert!(matches!(anno, RawAnnotation::Field(FieldAnnotation::Shared)));
+        assert!(matches!(
+            anno,
+            RawAnnotation::Field(FieldAnnotation::Shared)
+        ));
     }
 
     #[test]
@@ -296,7 +302,10 @@ mod tests {
         let err = parse_rust_annotation("# @rust: tagged_enum(discriminator = \"type\"")
             .expect_err("missing close paren should error");
         let msg = err.to_string();
-        assert!(msg.contains("tagged_enum"), "msg should mention tagged_enum: {msg}");
+        assert!(
+            msg.contains("tagged_enum"),
+            "msg should mention tagged_enum: {msg}"
+        );
     }
 
     #[test]
@@ -309,10 +318,9 @@ mod tests {
 
     #[test]
     fn accepts_extra_whitespace() {
-        let anno =
-            parse_rust_annotation("#    @rust:   tagged_enum( discriminator = \"type\" )")
-                .expect("parse")
-                .expect("recognised");
+        let anno = parse_rust_annotation("#    @rust:   tagged_enum( discriminator = \"type\" )")
+            .expect("parse")
+            .expect("recognised");
         assert!(matches!(
             anno,
             RawAnnotation::TaggedEnum(TaggedEnumAnnotation { discriminator }) if discriminator == "type"

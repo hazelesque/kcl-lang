@@ -67,8 +67,10 @@ fn libkcl_run_unsafe(args: *const c_char, plugin_agent: *const c_char) -> Result
     // than panicking on .expect — the C caller (Go's cgo path) gets
     // a structured diagnostic instead of a SIGABRT.
     let mut args = kcl_runner::ExecProgramArgs::try_from_json(args_str).map_err(|e| {
-        PanicInfo::from(format!("libkcl_run: ExecProgramArgs JSON parse failed: {e}"))
-            .to_json_string()
+        PanicInfo::from(format!(
+            "libkcl_run: ExecProgramArgs JSON parse failed: {e}"
+        ))
+        .to_json_string()
     })?;
     args.plugin_agent = plugin_agent as u64;
     exec_program(ParseSessionRef::default(), &args)

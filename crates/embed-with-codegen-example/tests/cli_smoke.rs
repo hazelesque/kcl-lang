@@ -57,10 +57,7 @@ fn default_invocation_is_quiet_on_stderr() {
     // log_messages forwarding — those lines are explicitly stderr by
     // design (the library never writes to stderr; this is the
     // consumer doing it). Filter those out before asserting "quiet".
-    let tracing_lines: Vec<&str> = stderr
-        .lines()
-        .filter(|l| !l.starts_with("[kcl]"))
-        .collect();
+    let tracing_lines: Vec<&str> = stderr.lines().filter(|l| !l.starts_with("[kcl]")).collect();
     assert!(
         tracing_lines.is_empty(),
         "expected no tracing output without KCL_LOG; got:\n{}",

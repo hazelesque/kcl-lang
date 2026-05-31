@@ -47,8 +47,8 @@ use kcl_ast::ast;
 use kcl_parser::{KCLModuleCache, LoadProgramOptions, ParseSession, VirtualPackage, load_program};
 use kcl_runner::{ExecProgramArgs, FastRunner, RunnerOptions};
 use kcl_runtime::ValueRef;
-use tracing::info_span;
 use kcl_sema::resolver::resolve_program;
+use tracing::info_span;
 
 /// The diagnostic type used throughout this crate's error surface.
 ///
@@ -220,11 +220,7 @@ impl Embedded {
     ///   same builder returns
     ///   [`EmbedError::AlreadyRegistered`]; replace-semantics is not
     ///   supported in v1.
-    pub fn register_module(
-        &mut self,
-        module_path: &str,
-        source: &str,
-    ) -> Result<(), EmbedError> {
+    pub fn register_module(&mut self, module_path: &str, source: &str) -> Result<(), EmbedError> {
         if self.modules.contains_key(module_path) {
             return Err(EmbedError::AlreadyRegistered(module_path.to_string()));
         }
@@ -297,10 +293,7 @@ impl EmbeddedReady {
     /// currently surfaces as a single best-effort [`Diagnostic`]
     /// derived from the runner's `err_message` string — Phase 6a
     /// will swap this for direct structured propagation.
-    pub fn evaluate(
-        &self,
-        args: EvaluateArgs,
-    ) -> Result<EvaluateOutcome, EvaluationError> {
+    pub fn evaluate(&self, args: EvaluateArgs) -> Result<EvaluateOutcome, EvaluationError> {
         // Phase 6b: once-per-evaluation span at the public API
         // boundary. registered_module_count is recorded as a span
         // field so a subscriber can correlate evaluations against
@@ -328,9 +321,7 @@ impl EmbeddedReady {
             Ok(result) => result,
             Err(panic_payload) => {
                 let msg = kcl_error::err_to_str(panic_payload);
-                Err(EvaluationError::Internal(Box::new(
-                    BridgedPanicError(msg),
-                )))
+                Err(EvaluationError::Internal(Box::new(BridgedPanicError(msg))))
             }
         }
     }
@@ -373,9 +364,7 @@ impl EmbeddedReady {
         if let Ok(mut cache_w) = cache.write() {
             for vp in self.virtual_packages.values() {
                 for (path, source) in &vp.files {
-                    cache_w
-                        .source_code
-                        .insert(path.clone(), source.clone());
+                    cache_w.source_code.insert(path.clone(), source.clone());
                 }
             }
         }
@@ -436,16 +425,12 @@ fn evaluate_inner(
             Some(load_opts),
             Some(module_cache),
         )
-        .map_err(|e| {
-            EvaluationError::Internal(Box::new(BridgedAnyhowError(e.to_string())))
-        })?
+        .map_err(|e| EvaluationError::Internal(Box::new(BridgedAnyhowError(e.to_string()))))?
     };
 
     let (parse_errors, _warnings) = sess.classification();
     if !parse_errors.is_empty() {
-        return Err(EvaluationError::Parse(
-            parse_errors.into_iter().collect(),
-        ));
+        return Err(EvaluationError::Parse(parse_errors.into_iter().collect()));
     }
     // load_program may also stash parse errors on parse_result.errors
     // (separately from the session Handler). Surface both.
@@ -476,9 +461,9 @@ fn evaluate_inner(
     let runner = FastRunner::new(Some(RunnerOptions {
         plugin_agent_ptr: exec_args.plugin_agent,
     }));
-    let runner_result = runner.run_to_value(&program, &exec_args).map_err(|e| {
-        EvaluationError::Internal(Box::new(BridgedAnyhowError(e.to_string())))
-    })?;
+    let runner_result = runner
+        .run_to_value(&program, &exec_args)
+        .map_err(|e| EvaluationError::Internal(Box::new(BridgedAnyhowError(e.to_string()))))?;
 
     let log_messages = split_log_messages(&runner_result.log_message);
 
@@ -486,9 +471,9 @@ fn evaluate_inner(
         // Phase 6a will replace this with direct Diagnostic
         // propagation. For now, surface the err_message as a single
         // best-effort Diagnostic in EvaluationError::Evaluate.
-        return Err(EvaluationError::Evaluate(vec![
-            diagnostic_from_runner_err(&runner_result.err_message),
-        ]));
+        return Err(EvaluationError::Evaluate(vec![diagnostic_from_runner_err(
+            &runner_result.err_message,
+        )]));
     }
 
     Ok(EvaluateOutcome {
@@ -526,9 +511,7 @@ fn diagnostic_from_runner_err(message: &str) -> Diagnostic {
             note: None,
             suggested_replacement: None,
         }],
-        code: Some(DiagnosticId::Error(
-            kcl_error::ErrorKind::EvaluationError,
-        )),
+        code: Some(DiagnosticId::Error(kcl_error::ErrorKind::EvaluationError)),
     }
 }
 

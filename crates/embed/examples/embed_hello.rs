@@ -55,7 +55,10 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            println!("vm.name      = {}", vm.dict_get_value("name").unwrap().as_str());
+            println!(
+                "vm.name      = {}",
+                vm.dict_get_value("name").unwrap().as_str()
+            );
             println!(
                 "vm.memory_mb = {}",
                 vm.dict_get_value("memory_mb").unwrap().as_int()

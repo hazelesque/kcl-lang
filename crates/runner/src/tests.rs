@@ -196,8 +196,7 @@ fn try_from_json_returns_err_on_malformed_input() {
 /// CLI relies on (settings-file path producing empty args).
 #[test]
 fn try_from_json_empty_string_yields_default() {
-    let args = ExecProgramArgs::try_from_json("")
-        .expect("empty string should yield default args");
+    let args = ExecProgramArgs::try_from_json("").expect("empty string should yield default args");
     assert_eq!(args.k_filename_list, Vec::<String>::new());
     assert_eq!(args.k_code_list, Vec::<String>::new());
 
@@ -548,7 +547,11 @@ mod structured_output_tests {
             .value
             .dict_get_value("vm")
             .expect("missing key 'vm' at top level");
-        assert!(vm.is_schema(), "vm is not a schema_value: type={}", vm.type_str());
+        assert!(
+            vm.is_schema(),
+            "vm is not a schema_value: type={}",
+            vm.type_str()
+        );
         let vm_inner = vm.as_schema();
         assert_eq!(vm_inner.name, "Vm", "schema name mismatch");
         // Schema-instantiated default value flows through to the result.
@@ -597,7 +600,10 @@ mod structured_output_tests {
             serde_json::from_str(&string_result.json_result).expect("string json invalid");
         let str_vm = str_json.get("vm").expect("string path missing 'vm'");
         assert_eq!(str_vm.get("name").and_then(Value::as_str), Some("beta"));
-        let str_disks = str_vm.get("disks").and_then(Value::as_array).expect("disks");
+        let str_disks = str_vm
+            .get("disks")
+            .and_then(Value::as_array)
+            .expect("disks");
         assert_eq!(str_disks.len(), 2);
 
         let val_vm = value_result.value.dict_get_value("vm").expect("'vm'");
@@ -680,8 +686,7 @@ mod structured_output_tests {
         // pre-cleanup, the second call's context-resident storage could
         // bleed through and both KCL string values would have been
         // equal. Asserting their distinctness catches the regression.
-        let parsed: Value =
-            serde_json::from_str(&result.json_result).expect("json_result invalid");
+        let parsed: Value = serde_json::from_str(&result.json_result).expect("json_result invalid");
         let first = parsed
             .get("first")
             .and_then(Value::as_str)
@@ -826,7 +831,9 @@ mod structured_output_tests {
             "cores default did not flow through on alpha"
         );
 
-        let alpha_checks = alpha.dict_get_value("health_checks").expect("health_checks");
+        let alpha_checks = alpha
+            .dict_get_value("health_checks")
+            .expect("health_checks");
         assert!(alpha_checks.is_list());
         let alpha_checks_list = alpha_checks.as_list_ref();
         assert_eq!(alpha_checks_list.values.len(), 3);
@@ -906,18 +913,20 @@ mod structured_output_tests {
         let sess = Arc::new(ParseSession::default());
         let args = ExecProgramArgs {
             k_filename_list: vec!["test.k".to_string()],
-            k_code_list: vec![concat!(
-                "mixin AuditLogMixin:\n",
-                "    audit_id: str\n",
-                "    created_by: str = \"system\"\n",
-                "\n",
-                "schema Foo:\n",
-                "    mixin [AuditLogMixin]\n",
-                "    name: str\n",
-                "\n",
-                "foo = Foo {audit_id = \"abc123\", name = \"alpha\"}\n",
-            )
-            .to_string()],
+            k_code_list: vec![
+                concat!(
+                    "mixin AuditLogMixin:\n",
+                    "    audit_id: str\n",
+                    "    created_by: str = \"system\"\n",
+                    "\n",
+                    "schema Foo:\n",
+                    "    mixin [AuditLogMixin]\n",
+                    "    name: str\n",
+                    "\n",
+                    "foo = Foo {audit_id = \"abc123\", name = \"alpha\"}\n",
+                )
+                .to_string(),
+            ],
             ..Default::default()
         };
         let result = exec_program_to_value(sess, &args).expect("evaluation failed");

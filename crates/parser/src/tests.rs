@@ -891,17 +891,13 @@ mod virtual_packages {
     /// `PathBuf` exactly as provided in `VirtualPackage.files`, matching
     /// what `parse_file`'s lookup will use after `find_packages`
     /// → `is_virtual_pkg` → `PkgFile::new(p.into(), ...)`.
-    fn module_cache_with_virtual_sources(
-        vps: &HashMap<String, VirtualPackage>,
-    ) -> KCLModuleCache {
+    fn module_cache_with_virtual_sources(vps: &HashMap<String, VirtualPackage>) -> KCLModuleCache {
         let cache = KCLModuleCache::default();
         {
             let mut cache_w = cache.write().unwrap();
             for vp in vps.values() {
                 for (path, source) in &vp.files {
-                    cache_w
-                        .source_code
-                        .insert(path.clone(), source.clone());
+                    cache_w.source_code.insert(path.clone(), source.clone());
                 }
             }
         }
@@ -1091,7 +1087,12 @@ mod virtual_packages {
         let main = dummy_main_file();
         // The load itself returns Ok; the diagnostic is recorded on the
         // session.
-        let _ = load_program(sess.clone(), &[&main], Some(opts), Some(KCLModuleCache::default()));
+        let _ = load_program(
+            sess.clone(),
+            &[&main],
+            Some(opts),
+            Some(KCLModuleCache::default()),
+        );
 
         let errors = sess.classification().0;
         let found_pkgpath_not_found = errors.iter().any(|d| {

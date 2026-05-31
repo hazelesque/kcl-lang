@@ -142,7 +142,9 @@ pub fn analyse_inline_source(kcl_source: &str) -> Result<ModuleIR, CodegenError>
         return Err(CodegenError::Parse(parse_errors.into_iter().collect()));
     }
     if !parse_result.errors.is_empty() {
-        return Err(CodegenError::Parse(parse_result.errors.into_iter().collect()));
+        return Err(CodegenError::Parse(
+            parse_result.errors.into_iter().collect(),
+        ));
     }
 
     let mut program = parse_result.program;
@@ -313,10 +315,7 @@ mod tests {
     /// not produce a broken `()` type.
     #[test]
     fn non_string_literal_union_errors_with_actionable_message() {
-        let src = concat!(
-            "schema Spec:\n",
-            "    quota: int | str\n",
-        );
+        let src = concat!("schema Spec:\n", "    quota: int | str\n",);
         let err = generate_to_string(src).expect_err("should fail");
         match err {
             CodegenError::UnsupportedFeature { feature, location } => {
@@ -517,11 +516,7 @@ mod tests {
     /// flat-struct path.
     #[test]
     fn no_annotations_means_empty_annotations_field() {
-        let src = concat!(
-            "schema Plain:\n",
-            "    name: str\n",
-            "    count: int = 1\n",
-        );
+        let src = concat!("schema Plain:\n", "    name: str\n", "    count: int = 1\n",);
         let module = analyse_inline_source(src).expect("analyse");
         let s = &module.schemas[0];
         assert!(s.annotations.tagged_enum.is_none());

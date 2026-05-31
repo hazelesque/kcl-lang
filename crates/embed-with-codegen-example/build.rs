@@ -12,9 +12,8 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
-    let manifest_dir = PathBuf::from(
-        env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"),
-    );
+    let manifest_dir =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
     let schema_path = manifest_dir.join("schema.k");
     let kcl_source = fs::read_to_string(&schema_path)
         .unwrap_or_else(|e| panic!("read {}: {e}", schema_path.display()));
@@ -24,8 +23,7 @@ fn main() {
         Err(e) => panic!("kcl-rust-codegen failed: {e}"),
     };
 
-    let out_dir =
-        PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
     let out_path = out_dir.join("generated_types.rs");
     fs::write(&out_path, rust_source)
         .unwrap_or_else(|e| panic!("write {}: {e}", out_path.display()));

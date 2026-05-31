@@ -9,8 +9,8 @@
 //! typed Rust. No JSON. No hand-written struct definitions.
 
 use kcl_embed::{Embedded, EvaluateArgs};
-use kcl_rust_codegen_fixture::{Action, Disk, DiskStorageClass, Vm, VmState};
 use kcl_runtime::ValueRef;
+use kcl_rust_codegen_fixture::{Action, Disk, DiskStorageClass, Vm, VmState};
 
 const VM_PROGRAM: &str = include_str!("../schemas.k");
 
@@ -120,8 +120,7 @@ fn defaults_flow_through_codegen() {
         })
         .expect("evaluate");
 
-    let vm = Vm::try_from(&outcome.value.dict_get_value("vm").unwrap())
-        .expect("try_into");
+    let vm = Vm::try_from(&outcome.value.dict_get_value("vm").unwrap()).expect("try_into");
     assert_eq!(vm.name, "beta");
     assert_eq!(vm.memory_mb, 1024, "default 1024 should flow through");
     assert_eq!(vm.cores, 2, "default 2 should flow through");
@@ -185,8 +184,7 @@ fn unexpected_str_enum_literal_surfaces_as_try_from_err() {
     let result = VmState::try_from(&bogus_state);
     let err = result.expect_err("unexpected literal should surface as Err");
     assert!(
-        err.contains("exploded")
-            && (err.contains("running") || err.contains("expected one of")),
+        err.contains("exploded") && (err.contains("running") || err.contains("expected one of")),
         "Err should mention both the unexpected literal and the allowed set; got: {err:?}"
     );
 }
@@ -258,8 +256,7 @@ fn disk_type_standalone_roundtrip() {
         })
         .expect("evaluate");
 
-    let disk = Disk::try_from(&outcome.value.dict_get_value("d").unwrap())
-        .expect("try_into");
+    let disk = Disk::try_from(&outcome.value.dict_get_value("d").unwrap()).expect("try_into");
     assert_eq!(disk.size_gb, 250);
     assert_eq!(disk.label, Some("data".to_string()));
 }

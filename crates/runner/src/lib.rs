@@ -52,11 +52,7 @@ pub fn exec_program(sess: ParseSessionRef, args: &ExecProgramArgs) -> Result<Exe
     // full evaluation as a tree. file_count is the only field cheap
     // enough to compute here; main file path is recorded on the parse
     // sub-span where it belongs structurally.
-    let _span = info_span!(
-        "kcl_exec_program",
-        file_count = args.k_filename_list.len(),
-    )
-    .entered();
+    let _span = info_span!("kcl_exec_program", file_count = args.k_filename_list.len(),).entered();
     let opts = args.get_load_program_options();
     let kcl_paths_str = args
         .k_filename_list

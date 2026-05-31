@@ -24,11 +24,8 @@ fn main_imports_registered_module_and_uses_default() {
 
     let outcome = ready
         .evaluate(EvaluateArgs {
-            main_source: concat!(
-                "import tilley\n",
-                "vm = tilley.Vm {name = \"alpha\"}\n",
-            )
-            .to_string(),
+            main_source: concat!("import tilley\n", "vm = tilley.Vm {name = \"alpha\"}\n",)
+                .to_string(),
             ..EvaluateArgs::default()
         })
         .expect("evaluate should succeed");
@@ -73,11 +70,8 @@ fn registered_modules_can_transitively_import_each_other() {
 
     let outcome = ready
         .evaluate(EvaluateArgs {
-            main_source: concat!(
-                "import tilley\n",
-                "vm = tilley.Vm {name = \"alpha\"}\n",
-            )
-            .to_string(),
+            main_source: concat!("import tilley\n", "vm = tilley.Vm {name = \"alpha\"}\n",)
+                .to_string(),
             ..EvaluateArgs::default()
         })
         .expect("evaluate");
@@ -161,18 +155,18 @@ fn runtime_check_block_violation_surfaces_as_evaluate_error() {
 
     let err = ready
         .evaluate(EvaluateArgs {
-            main_source: concat!(
-                "import tilley\n",
-                "vm = tilley.Vm {memory_mb = 16}\n",
-            )
-            .to_string(),
+            main_source: concat!("import tilley\n", "vm = tilley.Vm {memory_mb = 16}\n",)
+                .to_string(),
             ..EvaluateArgs::default()
         })
         .expect_err("check block should fire");
 
     match err {
         EvaluationError::Evaluate(diags) => {
-            assert!(!diags.is_empty(), "expected at least one Evaluate diagnostic");
+            assert!(
+                !diags.is_empty(),
+                "expected at least one Evaluate diagnostic"
+            );
             // Phase 6a will refine the conversion; for now we just
             // assert the message mentions the check predicate.
             let messages: Vec<&str> = diags
@@ -198,12 +192,8 @@ fn print_output_collected_into_log_messages() {
     let ready = Embedded::new().build();
     let outcome = ready
         .evaluate(EvaluateArgs {
-            main_source: concat!(
-                "print(\"first\")\n",
-                "print(\"second\")\n",
-                "result = 42\n",
-            )
-            .to_string(),
+            main_source: concat!("print(\"first\")\n", "print(\"second\")\n", "result = 42\n",)
+                .to_string(),
             ..EvaluateArgs::default()
         })
         .expect("evaluate");
@@ -378,8 +368,7 @@ fn trigger_evaluate_for_tracing() {
     let ready = embedded.build();
     let _ = ready
         .evaluate(EvaluateArgs {
-            main_source: "import tilley\nvm = tilley.Vm {name = \"alpha\"}\n"
-                .to_string(),
+            main_source: "import tilley\nvm = tilley.Vm {name = \"alpha\"}\n".to_string(),
             ..EvaluateArgs::default()
         })
         .expect("evaluate");
@@ -497,11 +486,8 @@ fn runtime_panic_surfaces_as_diagnostic_not_json() {
 
     let err = ready
         .evaluate(EvaluateArgs {
-            main_source: concat!(
-                "import tilley\n",
-                "vm = tilley.Vm {memory_mb = 16}\n",
-            )
-            .to_string(),
+            main_source: concat!("import tilley\n", "vm = tilley.Vm {memory_mb = 16}\n",)
+                .to_string(),
             ..EvaluateArgs::default()
         })
         .expect_err("check block should fire");
@@ -586,7 +572,10 @@ fn lambda_param_shadow_does_not_break_schema_coercion_in_module() {
         })
         .expect("evaluate should succeed after the param-shadow fix");
 
-    let via_lambda = outcome.value.dict_get_value("via_lambda").expect("via_lambda");
+    let via_lambda = outcome
+        .value
+        .dict_get_value("via_lambda")
+        .expect("via_lambda");
     assert!(
         via_lambda.is_schema(),
         "lambda body should coerce to schema; was: {}",
@@ -622,7 +611,10 @@ fn lambda_param_shadow_does_not_break_schema_coercion_in_main_source() {
         })
         .expect("evaluate should succeed after the param-shadow fix");
 
-    let via_lambda = outcome.value.dict_get_value("via_lambda").expect("via_lambda");
+    let via_lambda = outcome
+        .value
+        .dict_get_value("via_lambda")
+        .expect("via_lambda");
     assert!(via_lambda.is_schema());
     assert_eq!(via_lambda.as_schema().name, "Point");
     assert_eq!(via_lambda.dict_get_value("x").unwrap().as_int(), 3);
