@@ -95,6 +95,42 @@ pub fn render_diagnostics(diags: &[Diagnostic]) -> String {
     }
 }
 
+/// Write a slice of [`Diagnostic`]s straight to stderr through
+/// `kcl_error::Handler::emit`, which uses
+/// `compiler_base_error::EmitterWriter::default()` —
+/// `Destination::from_stderr(ColorChoice::Auto)` under the hood. The
+/// `Auto` choice means ANSI colour escapes are emitted when stderr is
+/// attached to a terminal and stripped when it's redirected to a
+/// file or pipe, matching the KCL CLI's own stderr behaviour.
+///
+/// Returns `true` if any of the diagnostics were `Error`-level
+/// (mirroring `Handler::emit`'s `has_errors` return), so the caller
+/// can decide whether to exit non-zero.
+///
+/// Use this in preference to [`render_diagnostics`] when the
+/// rendered block goes straight to the operator's terminal and you
+/// don't need to capture it as a `String` for logging — colour at
+/// the terminal is a substantial readability win over plain text.
+/// [`render_diagnostics`] remains the right choice when the output
+/// needs to flow through a structured logger that adds its own
+/// per-line prefix.
+pub fn emit_diagnostics_to_stderr(diags: &[Diagnostic]) -> bool {
+    let mut handler = kcl_error::Handler::default();
+    for d in diags {
+        handler.add_diagnostic(d.clone());
+    }
+    // Handler::emit returns Result<bool, anyhow::Error>. On the rare
+    // failure (template-loader I/O, etc.) fall through to the
+    // uncoloured render path so the operator still sees the diags.
+    match handler.emit() {
+        Ok(has_errors) => has_errors,
+        Err(_) => {
+            eprintln!("{}", render_diagnostics(diags));
+            diags.iter().any(|d| d.is_error())
+        }
+    }
+}
+
 /// Synthetic-path prefix used as the `pkg_root` for in-memory modules.
 /// Conventional only; the parser treats it as an opaque identifier.
 /// Exposed primarily for debugging/diagnostics where a path string
@@ -147,6 +183,28 @@ pub struct EvaluateArgs {
     /// Top-level KCL program source — the equivalent of the file that
     /// would be passed positionally to `kcl run`. Required (no default).
     pub main_source: String,
+    /// Optional filename label paired with [`main_source`] for the
+    /// parser to attach to diagnostic ranges. `None` falls back to the
+    /// synthetic [`VIRTUAL_MAIN_FILENAME`] sentinel.
+    ///
+    /// **Safety:** the `KCLModuleCache` populated by `build_module_cache`
+    /// intercepts any path lookup whose key matches a registered
+    /// source, so passing a real on-disk path here (e.g.
+    /// `/tmp/foo.k`) is safe even when the file doesn't exist on
+    /// disk — the parser never reads from the filesystem for the
+    /// main source. The string is a label only; whatever you pass
+    /// shows up verbatim in diagnostic `Position.filename` fields
+    /// (modulo Windows drive-letter normalisation in
+    /// `kcl_utils::path::convert_windows_drive_letter`).
+    ///
+    /// **Why this exists:** consumers of `kcl_embed` like Tilley
+    /// already know the on-disk path of the user's program when they
+    /// read it. Forcing the diagnostic surface to anchor at
+    /// `__kcl_embed_main__.k` means the operator sees a synthetic
+    /// path in error output and has to mentally translate back to
+    /// their real file. Threading the real path here keeps the
+    /// "where did this error happen" answer accurate end-to-end.
+    pub main_filename: Option<String>,
     /// Working directory for KCL's mod-relative path resolution and
     /// vendor-package lookups. `None` means use the process cwd.
     pub work_dir: Option<PathBuf>,
@@ -417,7 +475,11 @@ fn build_exec_args(args: &EvaluateArgs) -> ExecProgramArgs {
             .work_dir
             .as_ref()
             .map(|p| p.to_string_lossy().to_string()),
-        k_filename_list: vec![VIRTUAL_MAIN_FILENAME.to_string()],
+        k_filename_list: vec![
+            args.main_filename
+                .clone()
+                .unwrap_or_else(|| VIRTUAL_MAIN_FILENAME.to_string()),
+        ],
         k_code_list: vec![args.main_source.clone()],
         overrides: args.overrides.clone(),
         path_selector: args.path_selector.clone(),
@@ -452,7 +514,18 @@ fn evaluate_inner(
     // Stage 1: parse. load_program collects diagnostics on the
     // session's Handler; surface them as EvaluationError::Parse if
     // any errors were recorded.
-    let main_path = VIRTUAL_MAIN_FILENAME;
+    //
+    // `main_path` must be the same string the parser stored in
+    // `k_filename_list[0]`, because the parser pairs entries by
+    // index — using a stale `VIRTUAL_MAIN_FILENAME` here when the
+    // caller overrode `EvaluateArgs::main_filename` would cause the
+    // entry-point lookup to miss the in-memory source and fall back
+    // to a disk read of the synthetic path (which doesn't exist).
+    let main_path = exec_args
+        .k_filename_list
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or(VIRTUAL_MAIN_FILENAME);
     let parse_result = {
         let _parse = info_span!("kcl_parse").entered();
         load_program(
