@@ -59,6 +59,42 @@ use tracing::info_span;
 /// reasons in this crate's README before flipping.
 pub use kcl_error::Diagnostic;
 
+/// Render a slice of [`Diagnostic`]s as the pretty CLI-style text
+/// (source-marker arrows, line/column headers, etc.) that the KCL
+/// command-line tool produces when a program fails to parse, resolve,
+/// or evaluate.
+///
+/// Without this helper, callers tend to fall back on `{e:?}` Debug
+/// printing of `EvaluationError`, which dumps a wall of nested struct
+/// literals that's near-illegible at the terminal. Threading the
+/// diagnostics through `kcl_error::Handler::emit_to_string` gets the
+/// same rendering pipeline the KCL CLI uses, including any source
+/// snippets, range markers, and replacement suggestions the upstream
+/// formatter attaches.
+///
+/// On internal rendering failure (Handler's emit returning an Err —
+/// uncommon in practice; usually a template-loader I/O issue), returns
+/// the underlying error converted via Debug-shaped fallback so the
+/// caller still gets *something* to print rather than a panic.
+pub fn render_diagnostics(diags: &[Diagnostic]) -> String {
+    let mut handler = kcl_error::Handler::default();
+    for d in diags {
+        handler.add_diagnostic(d.clone());
+    }
+    match handler.emit_to_string() {
+        Ok(s) => s,
+        Err(e) => {
+            // Best-effort fallback: render the same Diagnostic Debug
+            // shape callers were getting before, plus a marker that
+            // the pretty-render path failed so the operator knows
+            // what to look at.
+            format!(
+                "[kcl-embed: render_diagnostics fell through to Debug — {e}]\n{diags:#?}"
+            )
+        }
+    }
+}
+
 /// Synthetic-path prefix used as the `pkg_root` for in-memory modules.
 /// Conventional only; the parser treats it as an opaque identifier.
 /// Exposed primarily for debugging/diagnostics where a path string
