@@ -1,7 +1,8 @@
 use kcl_runtime::{
     BUILTIN_TYPES, ConfigEntryOperationKind, KCL_TYPE_ANY, PKG_PATH_PREFIX, ValueRef, check_type,
     dereference_type, is_dict_type, is_list_type, is_schema_type, is_type_union,
-    schema_config_meta, schema_runtime_type, separate_kv, split_type_union, val_plan,
+    schema_config_meta, schema_runtime_type, separate_kv, split_type_union,
+    try_coerce_mokkan_inet, val_plan,
 };
 use scopeguard::defer;
 
@@ -198,6 +199,17 @@ pub fn type_pack_and_check(
 pub fn convert_collection_value(s: &Evaluator, value: &ValueRef, tpe: &str) -> ValueRef {
     if tpe.is_empty() || tpe == KCL_TYPE_ANY {
         return value.clone();
+    }
+    // F1.3: str → mokkan inet/cidr/macaddr coercion. Runs before the
+    // non-collection early-return below because a str value isn't a
+    // collection but still needs transformation when the target is
+    // a mokkan type. Mirrors the parallel hook in
+    // `kcl_runtime::convert_collection_value` (val_type.rs); both
+    // call through to the same `try_coerce_mokkan_inet` helper so
+    // the strictness rules can't drift between the runtime and
+    // evaluator paths.
+    if let Some(coerced) = try_coerce_mokkan_inet(value, tpe) {
+        return coerced;
     }
     let is_collection = value.is_list() || value.is_dict();
     let invalid_match_dict = is_dict_type(tpe) && !value.is_dict();

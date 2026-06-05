@@ -66,6 +66,17 @@ impl ValueRef {
                 | Value::float_value(_)
                 | Value::bool_value(_)
                 | Value::str_value(_)
+                // F1.3: mokkan native types are primitive-shaped
+                // (carry a single typed payload, not a collection or
+                // schema). `match_builtin_type` walks `value.is_builtin()
+                // && value.type_str() == tpe` for the check, so this
+                // is what lets `field: cidr = "10.0.0.0/24"` accept
+                // the coerced cidr_value at schema-validation time.
+                | Value::cidr_value(_)
+                | Value::inet_value(_)
+                | Value::macaddr_value(_)
+                | Value::macaddr8_value(_)
+                | Value::ip_family_value(_)
         )
     }
 

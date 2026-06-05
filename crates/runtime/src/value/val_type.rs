@@ -53,6 +53,53 @@ pub type SchemaTypeFunc = unsafe extern "C-unwind" fn(
     *const kcl_value_ref_t,
 ) -> *const kcl_value_ref_t;
 
+/// F1.3: try to coerce a string value into one of the mokkan native
+/// network types based on the expected type string. Returns
+/// `Some(typed_value)` on success or `None` if either the value
+/// isn't a string or the parse failed. On a `None` return, the
+/// caller's `check_type` runs against the original str value and
+/// surfaces "expect cidr, got str" — F1.4 polish can add a more
+/// specific parse-failure error if the diagnostic UX becomes
+/// painful in practice.
+///
+/// Strictness:
+/// - `cidr`: strict canonical form via `cidr::IpCidr::from_str`;
+///   host bits set is a parse error (D8).
+/// - `inet`: lenient; host bits allowed; masklen optional —
+///   `cidr::IpInet::from_str` defaults to `/32`/`/128`.
+/// - `macaddr` / `macaddr8`: standard EUI-48 / EUI-64 text,
+///   case-insensitive, colon or hyphen separators (per the
+///   `macaddr` crate's `FromStr`).
+///
+/// `IpFamily` is deliberately absent — operators write the
+/// `mokkan.net.V4` / `net.V6` constants directly; no string
+/// coercion path exists.
+///
+/// Public so the evaluator crate's parallel `convert_collection_value`
+/// path can call it too without duplicating the strictness rules.
+pub fn try_coerce_mokkan_inet(value: &ValueRef, tpe: &str) -> Option<ValueRef> {
+    use std::str::FromStr as _;
+    let s = match &*value.rc.borrow() {
+        Value::str_value(s) => s.clone(),
+        _ => return None,
+    };
+    match tpe {
+        MOKKAN_TYPE_CIDR => cidr::IpCidr::from_str(&s)
+            .ok()
+            .map(|c| ValueRef::from(Value::cidr_value(c))),
+        MOKKAN_TYPE_INET => cidr::IpInet::from_str(&s)
+            .ok()
+            .map(|i| ValueRef::from(Value::inet_value(i))),
+        MOKKAN_TYPE_MACADDR => macaddr::MacAddr6::from_str(&s)
+            .ok()
+            .map(|m| ValueRef::from(Value::macaddr_value(m))),
+        MOKKAN_TYPE_MACADDR8 => macaddr::MacAddr8::from_str(&s)
+            .ok()
+            .map(|m| ValueRef::from(Value::macaddr8_value(m))),
+        _ => None,
+    }
+}
+
 // common
 impl ValueRef {
     pub fn type_str(&self) -> String {
@@ -268,6 +315,14 @@ pub fn convert_collection_value(ctx: &mut Context, value: &ValueRef, tpe: &str) 
         expected_list
     } else if BUILTIN_TYPES.contains(&tpe.as_str()) {
         value.clone()
+    } else if let Some(coerced) = try_coerce_mokkan_inet(value, &tpe) {
+        // F1.3: str → cidr/inet/macaddr/macaddr8 coercion at
+        // schema-validation time. Strict for cidr (host bits must be
+        // zero) per D8; lenient for inet (host bits allowed; masklen
+        // optional). MAC accepts canonical EUI-48/EUI-64 text.
+        // IpFamily has no string coercion — operators write the
+        // `net.V4` / `net.V6` constant directly.
+        coerced
     } else {
         let now_meta_info = ctx.panic_info.clone();
         let mut schema_type_name = if tpe.contains('.') {

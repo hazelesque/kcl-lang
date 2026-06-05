@@ -655,11 +655,9 @@ fn lambda_param_no_shadow_works_under_embed() {
 /// F1.2 — mokkan native type names (`cidr`, `inet`, `macaddr`,
 /// `macaddr8`, `IpFamily`) register as built-in named types. A
 /// schema declaring fields of these types parses cleanly through
-/// sema; the values themselves aren't constructable from KCL yet
-/// (F1.3 string coercion lands separately, F1.4 builtin
-/// constructors / `mokkan.net.V4` constants land in their stages)
-/// so this test just confirms the type-name resolution at the
-/// schema-parse layer.
+/// sema; values themselves are constructable via string coercion
+/// (F1.3) for inet/cidr/MAC types — `IpFamily` waits for the
+/// `mokkan.net.V4` constant to land in F1.4.
 #[test]
 fn mokkan_native_type_names_register_in_schemas() {
     let ready = Embedded::new().build();
@@ -684,4 +682,100 @@ fn mokkan_native_type_names_register_in_schemas() {
     let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
     assert!(cfg.is_schema(), "cfg should be a schema instance");
     assert_eq!(cfg.as_schema().name, "NetCfg");
+}
+
+/// F1.3 — string coercion at schema-validation time. A field
+/// typed `cidr` accepts a canonical CIDR string and the resulting
+/// value carries the `cidr_value` runtime variant (type_str
+/// `"cidr"`). Same for `inet` and `macaddr`.
+#[test]
+fn mokkan_string_coercion_typed_inet_at_validation_time() {
+    let ready = Embedded::new().build();
+    let outcome = ready
+        .evaluate(EvaluateArgs {
+            main_source: concat!(
+                "schema NetCfg:\n",
+                "    cidr_field: cidr\n",
+                "    inet_field: inet\n",
+                "    mac_field: macaddr\n",
+                "    mac8_field: macaddr8\n",
+                "\n",
+                "cfg = NetCfg {\n",
+                "    cidr_field = \"10.0.0.0/24\"\n",
+                "    inet_field = \"10.0.5.1/24\"\n",
+                "    mac_field = \"02:00:00:aa:bb:cc\"\n",
+                "    mac8_field = \"02:00:00:00:00:aa:bb:cc\"\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        })
+        .expect("string-coercion should succeed for canonical values");
+
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+    let c = cfg.dict_get_value("cidr_field").unwrap();
+    assert_eq!(c.type_str(), "cidr", "cidr_field should now carry a typed cidr_value");
+    let i = cfg.dict_get_value("inet_field").unwrap();
+    assert_eq!(i.type_str(), "inet");
+    let m = cfg.dict_get_value("mac_field").unwrap();
+    assert_eq!(m.type_str(), "macaddr");
+    let m8 = cfg.dict_get_value("mac8_field").unwrap();
+    assert_eq!(m8.type_str(), "macaddr8");
+}
+
+/// F1.3 / D8 — `str → cidr` is strict on canonical form. Host bits
+/// set surface as a parse failure; the field-validation path
+/// keeps the original str value and `check_type` rejects it with
+/// "expect cidr, got str". (Better error UX — explicit "host bits
+/// were set in cidr value" — is a future polish; the failure is
+/// loud-and-loud at this stage.)
+#[test]
+fn mokkan_string_coercion_strict_cidr_rejects_host_bits_set() {
+    let ready = Embedded::new().build();
+    let result = ready.evaluate(EvaluateArgs {
+        main_source: concat!(
+            "schema NetCfg:\n",
+            "    cidr_field: cidr\n",
+            "\n",
+            // 10.0.5.1/24 — host bits are non-zero, parser rejects
+            // per D8 strict policy. Operator who wants host bits
+            // should declare the field as `inet`.
+            "cfg = NetCfg {\n",
+            "    cidr_field = \"10.0.5.1/24\"\n",
+            "}\n",
+        )
+        .to_string(),
+        ..EvaluateArgs::default()
+    });
+    let err = result.expect_err("non-canonical CIDR should fail validation");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("cidr") && (msg.contains("str") || msg.contains("expect")),
+        "error should mention cidr / str mismatch; got: {msg}"
+    );
+}
+
+/// F1.3 — `str → inet` is lenient. Same "10.0.5.1/24" value that
+/// `cidr` rejects above parses cleanly into an `inet`.
+#[test]
+fn mokkan_string_coercion_lenient_inet_accepts_host_bits_set() {
+    let ready = Embedded::new().build();
+    let outcome = ready
+        .evaluate(EvaluateArgs {
+            main_source: concat!(
+                "schema NetCfg:\n",
+                "    inet_field: inet\n",
+                "\n",
+                "cfg = NetCfg {\n",
+                "    inet_field = \"10.0.5.1/24\"\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        })
+        .expect("inet accepts host-bits-set strings (D8 lenient policy)");
+
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+    let i = cfg.dict_get_value("inet_field").unwrap();
+    assert_eq!(i.type_str(), "inet");
 }

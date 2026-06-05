@@ -30,6 +30,21 @@ pub fn subsume(ty_lhs: TypeRef, ty_rhs: TypeRef, check_left_any: bool) -> bool {
         }
     } else if ty_lhs.is_int() && ty_rhs.is_float() {
         true
+    } else if ty_lhs.is_str()
+        && (ty_rhs.is_cidr() || ty_rhs.is_inet() || ty_rhs.is_macaddr() || ty_rhs.is_macaddr8())
+    {
+        // F1.3: str → mokkan inet types is assignable. Runtime
+        // coercion in `convert_collection_value` parses the string
+        // at schema-validation time and substitutes the typed value;
+        // if the parse fails, runtime check_type rejects loudly.
+        // IpFamily deliberately omitted — operators write the
+        // `mokkan.net.V4` / `net.V6` constants directly, no string
+        // form is parsed.
+        //
+        // The `is_str` predicate above covers both `Str` and
+        // `StrLit("...")` because both carry the STR flag (see
+        // `Type::str_lit` constructor at constants.rs).
+        true
     } else if ty_lhs.is_number_multiplier() && ty_rhs.is_number_multiplier() {
         let ty_lhs = ty_lhs.into_number_multiplier();
         let ty_rhs = ty_rhs.into_number_multiplier();
