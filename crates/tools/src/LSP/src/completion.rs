@@ -845,7 +845,14 @@ fn type_to_item_kind(ty: &Type) -> Option<KCLCompletionItemKind> {
         | TypeKind::Dict(_)
         | TypeKind::Union(_)
         | TypeKind::NumberMultiplier(_)
-        | TypeKind::Named(_) => Some(KCLCompletionItemKind::Variable),
+        | TypeKind::Named(_)
+        // F1.2: mokkan primitive types — Variable kind for LSP
+        // completion (same as int/str/etc.).
+        | TypeKind::Cidr
+        | TypeKind::Inet
+        | TypeKind::Macaddr
+        | TypeKind::Macaddr8
+        | TypeKind::IpFamily => Some(KCLCompletionItemKind::Variable),
         TypeKind::Schema(_) => Some(KCLCompletionItemKind::Schema),
         TypeKind::Function(_) => Some(KCLCompletionItemKind::Function),
         TypeKind::Module(_) => Some(KCLCompletionItemKind::Module),

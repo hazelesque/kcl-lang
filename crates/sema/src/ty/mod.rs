@@ -86,6 +86,12 @@ impl Type {
             TypeKind::Void => VOID_TYPE_STR.to_string(),
             TypeKind::Module(module_ty) => format!("{} '{}'", MODULE_TYPE_STR, module_ty.pkgpath),
             TypeKind::Named(name) => name.to_string(),
+            // F1.2: mokkan native type names.
+            TypeKind::Cidr => CIDR_TYPE_STR.to_string(),
+            TypeKind::Inet => INET_TYPE_STR.to_string(),
+            TypeKind::Macaddr => MACADDR_TYPE_STR.to_string(),
+            TypeKind::Macaddr8 => MACADDR8_TYPE_STR.to_string(),
+            TypeKind::IpFamily => IP_FAMILY_TYPE_STR.to_string(),
         }
     }
 
@@ -176,12 +182,28 @@ pub enum TypeKind {
     Module(ModuleType),
     /// A named type alias.
     Named(String),
+    /// Mokkan (F1.2): PostgreSQL-shaped CIDR — strict canonical form
+    /// (host bits zero). Written as `cidr`.
+    Cidr,
+    /// Mokkan (F1.2): PostgreSQL-shaped inet — host address with
+    /// optional masklen. Written as `inet`.
+    Inet,
+    /// Mokkan (F1.2): EUI-48 MAC address. Written as `macaddr`.
+    Macaddr,
+    /// Mokkan (F1.2): EUI-64 MAC address. Written as `macaddr8`.
+    Macaddr8,
+    /// Mokkan (F1.2): family-tagged enum with variants `V4`/`V6`.
+    /// Used wherever IP family is declared explicitly
+    /// (NetworkDefinition.family, symbolic_subnet signature,
+    /// resolver validation). Written as `IpFamily`.
+    IpFamily,
 }
 
 bitflags::bitflags! {
     /// TypeFlags provides fast access to information that is also contained
-    /// in `kind`.
-    pub struct TypeFlags: u16 {
+    /// in `kind`. Bumped from u16 to u32 in F1.2 to accommodate the
+    /// mokkan native types; plenty of bits remain.
+    pub struct TypeFlags: u32 {
         const VOID = 1 << 0;
         const INT = 1 << 1;
         const FLOAT = 1 << 2;
@@ -198,6 +220,12 @@ bitflags::bitflags! {
         const FUNCTION = 1 << 13;
         const MODULE = 1 << 14;
         const NAMED = 1 << 15;
+        // F1.2: mokkan native types.
+        const CIDR = 1 << 16;
+        const INET = 1 << 17;
+        const MACADDR = 1 << 18;
+        const MACADDR8 = 1 << 19;
+        const IP_FAMILY = 1 << 20;
     }
 }
 

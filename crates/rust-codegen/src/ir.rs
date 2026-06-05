@@ -786,6 +786,28 @@ fn field_kind_for(
         TypeKind::Void => FieldKind::Unsupported("Void-typed field".to_string()),
         TypeKind::Module(_) => FieldKind::Unsupported("module-typed field".to_string()),
         TypeKind::Named(name) => FieldKind::Unsupported(format!("Named type alias `{name}`")),
+        // F1.2: mokkan native types — sema-level registered but
+        // codegen mapping (to `cidr::IpCidr` / `cidr::IpInet` /
+        // `macaddr::MacAddr6` / `macaddr::MacAddr8` / `IpFamily`)
+        // lands in F1.6. Marked Unsupported here so any consumer
+        // attempting codegen now gets a clear error rather than
+        // silently emitting a wrong type. F1.6 replaces each arm
+        // with the typed FieldKind.
+        TypeKind::Cidr => FieldKind::Unsupported(
+            "cidr-typed field (typed-inet codegen lands in F1.6)".to_string(),
+        ),
+        TypeKind::Inet => FieldKind::Unsupported(
+            "inet-typed field (typed-inet codegen lands in F1.6)".to_string(),
+        ),
+        TypeKind::Macaddr => FieldKind::Unsupported(
+            "macaddr-typed field (typed-mac codegen lands in F1.6)".to_string(),
+        ),
+        TypeKind::Macaddr8 => FieldKind::Unsupported(
+            "macaddr8-typed field (typed-mac codegen lands in F1.6)".to_string(),
+        ),
+        TypeKind::IpFamily => FieldKind::Unsupported(
+            "IpFamily-typed field (codegen lands in F1.6)".to_string(),
+        ),
     }
 }
 

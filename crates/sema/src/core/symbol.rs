@@ -401,6 +401,15 @@ impl SymbolData {
 
                 self.get_symbol_by_fully_qualified_name(&fully_qualified_ty_name)
             }
+            // F1.2: mokkan native types — no builtin attribute package
+            // in F1; the `mokkan.net` package that hosts the algebra
+            // lands in F1.4. Until then, primitive-shaped with no
+            // attached symbol.
+            TypeKind::Cidr => None,
+            TypeKind::Inet => None,
+            TypeKind::Macaddr => None,
+            TypeKind::Macaddr8 => None,
+            TypeKind::IpFamily => None,
         }
     }
 
@@ -467,6 +476,13 @@ impl SymbolData {
                 }
                 result
             }
+            // F1.2: mokkan primitive types have no attributes in F1
+            // (the algebra package lands in F1.4).
+            TypeKind::Cidr
+            | TypeKind::Inet
+            | TypeKind::Macaddr
+            | TypeKind::Macaddr8
+            | TypeKind::IpFamily => vec![],
         }
     }
 
@@ -513,6 +529,13 @@ impl SymbolData {
             TypeKind::Named(_) => self
                 .get_symbol(self.get_type_symbol(ty, module_info)?)?
                 .get_attribute(name, self, module_info),
+            // F1.2: mokkan primitive types — no attribute resolution
+            // in F1.
+            TypeKind::Cidr
+            | TypeKind::Inet
+            | TypeKind::Macaddr
+            | TypeKind::Macaddr8
+            | TypeKind::IpFamily => None,
         }
     }
 

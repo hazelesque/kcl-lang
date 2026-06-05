@@ -131,7 +131,25 @@ impl From<ast::Type> for Type {
                 ast::BasicType::Float => Type::FLOAT,
                 ast::BasicType::Str => Type::STR,
             },
-            ast::Type::Named(identifier) => Type::named(&identifier.get_name()),
+            ast::Type::Named(identifier) => {
+                // F1.2: short-circuit mokkan native types. The AST
+                // produces `Named` for any unqualified type name; for
+                // these we want the concrete Type variant directly so
+                // sema doesn't try to resolve them as user-defined
+                // symbols (which would fail with "name X not defined"
+                // — see resolver/ty.rs's `Named` arm). Parallel to
+                // how `int`/`str`/etc. arrive via `BasicType` rather
+                // than `Named`.
+                let name = identifier.get_name();
+                match name.as_str() {
+                    CIDR_TYPE_STR => Type::CIDR,
+                    INET_TYPE_STR => Type::INET,
+                    MACADDR_TYPE_STR => Type::MACADDR,
+                    MACADDR8_TYPE_STR => Type::MACADDR8,
+                    IP_FAMILY_TYPE_STR => Type::IP_FAMILY,
+                    _ => Type::named(&name),
+                }
+            }
             ast::Type::List(list_ty) => Type::list(
                 list_ty
                     .inner_type

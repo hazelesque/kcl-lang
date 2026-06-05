@@ -46,7 +46,17 @@ impl<'ctx> Resolver<'_> {
             | TypeKind::NumberMultiplier(_)
             | TypeKind::Function(_)
             | TypeKind::Named(_)
-            | TypeKind::Void => (false, self.any_ty()),
+            | TypeKind::Void
+            // F1.2: mokkan primitive types have no member attributes
+            // in F1. F1.4 wires `cidr.broadcast()` etc. as method-form
+            // function dispatch (via `mokkan.net`'s package surface),
+            // but at sema-level the algebra calls land as function
+            // applications, not attribute access.
+            | TypeKind::Cidr
+            | TypeKind::Inet
+            | TypeKind::Macaddr
+            | TypeKind::Macaddr8
+            | TypeKind::IpFamily => (false, self.any_ty()),
             TypeKind::Str | TypeKind::StrLit(_) => match STRING_MEMBER_FUNCTIONS.get(attr) {
                 Some(ty) => (true, Arc::new(ty.clone())),
                 None => (false, self.any_ty()),

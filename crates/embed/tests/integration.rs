@@ -651,3 +651,37 @@ fn lambda_param_no_shadow_works_under_embed() {
     assert_eq!(p.dict_get_value("x").unwrap().as_int(), 7);
     assert_eq!(p.dict_get_value("y").unwrap().as_int(), 9);
 }
+
+/// F1.2 — mokkan native type names (`cidr`, `inet`, `macaddr`,
+/// `macaddr8`, `IpFamily`) register as built-in named types. A
+/// schema declaring fields of these types parses cleanly through
+/// sema; the values themselves aren't constructable from KCL yet
+/// (F1.3 string coercion lands separately, F1.4 builtin
+/// constructors / `mokkan.net.V4` constants land in their stages)
+/// so this test just confirms the type-name resolution at the
+/// schema-parse layer.
+#[test]
+fn mokkan_native_type_names_register_in_schemas() {
+    let ready = Embedded::new().build();
+    let outcome = ready
+        .evaluate(EvaluateArgs {
+            main_source: concat!(
+                "schema NetCfg:\n",
+                "    cidr_field?: cidr\n",
+                "    inet_field?: inet\n",
+                "    mac_field?: macaddr\n",
+                "    mac8_field?: macaddr8\n",
+                "    family_field?: IpFamily\n",
+                "\n",
+                "# All optional so we can construct an empty schema.\n",
+                "cfg = NetCfg {}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        })
+        .expect("schema with mokkan type names should parse cleanly");
+
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+    assert!(cfg.is_schema(), "cfg should be a schema instance");
+    assert_eq!(cfg.as_schema().name, "NetCfg");
+}

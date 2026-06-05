@@ -365,8 +365,40 @@ impl Type {
             | TypeKind::Union(_)
             | TypeKind::Schema(_)
             | TypeKind::NumberMultiplier(_)
-            | TypeKind::Function(_) => true,
+            | TypeKind::Function(_)
+            // F1.2: mokkan native types — assignable like other
+            // primitives. `field: cidr = ...` works.
+            | TypeKind::Cidr
+            | TypeKind::Inet
+            | TypeKind::Macaddr
+            | TypeKind::Macaddr8
+            | TypeKind::IpFamily => true,
             TypeKind::Void | TypeKind::Module(_) | TypeKind::Named(_) => false,
         }
+    }
+
+    // F1.2: is_<mokkan-type> convenience predicates (parallel to
+    // is_int/is_str/etc. above). Useful for type-checker dispatch
+    // and the F1.3 string-coercion path.
+
+    #[inline]
+    pub fn is_cidr(&self) -> bool {
+        self.flags.contains(TypeFlags::CIDR)
+    }
+    #[inline]
+    pub fn is_inet(&self) -> bool {
+        self.flags.contains(TypeFlags::INET)
+    }
+    #[inline]
+    pub fn is_macaddr(&self) -> bool {
+        self.flags.contains(TypeFlags::MACADDR)
+    }
+    #[inline]
+    pub fn is_macaddr8(&self) -> bool {
+        self.flags.contains(TypeFlags::MACADDR8)
+    }
+    #[inline]
+    pub fn is_ip_family(&self) -> bool {
+        self.flags.contains(TypeFlags::IP_FAMILY)
     }
 }

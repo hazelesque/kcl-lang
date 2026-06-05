@@ -23,6 +23,15 @@ pub const NUMBER_MULTIPLIER_PKG_TYPE_STR: &str = "units.NumberMultiplier";
 pub const NUMBER_MULTIPLIER_REGEX: &str =
     r"^([1-9][0-9]{0,63})(E|P|T|G|M|K|k|m|u|n|Ei|Pi|Ti|Gi|Mi|Ki)$";
 
+// F1.2: mokkan native type-name string constants. Schema authors
+// write `field: cidr`/`field: inet`/etc.; the parser resolves them
+// via TYPES_MAPPING below.
+pub const CIDR_TYPE_STR: &str = "cidr";
+pub const INET_TYPE_STR: &str = "inet";
+pub const MACADDR_TYPE_STR: &str = "macaddr";
+pub const MACADDR8_TYPE_STR: &str = "macaddr8";
+pub const IP_FAMILY_TYPE_STR: &str = "IpFamily";
+
 pub const ITERABLE_TYPE_STR: &str = "str|{:}|[]";
 pub const NUMBER_TYPE_STR: &str = "int|float|bool";
 pub const NUM_OR_STR_TYPE_STR: &str = "int|float|bool|str";
@@ -57,6 +66,14 @@ pub static TYPES_MAPPING: Lazy<IndexMap<String, Type>> = Lazy::new(|| {
     mapping.insert(STR_TYPE_STR.to_string(), Type::STR);
     mapping.insert(BOOL_TYPE_STR.to_string(), Type::BOOL);
     mapping.insert(ANY_TYPE_STR.to_string(), Type::ANY);
+    // F1.2: mokkan native types. Short-circuit before falling
+    // through to `parse_named_type_str` so `field: cidr` resolves
+    // to the typed primitive rather than a Named-as-symbol lookup.
+    mapping.insert(CIDR_TYPE_STR.to_string(), Type::CIDR);
+    mapping.insert(INET_TYPE_STR.to_string(), Type::INET);
+    mapping.insert(MACADDR_TYPE_STR.to_string(), Type::MACADDR);
+    mapping.insert(MACADDR8_TYPE_STR.to_string(), Type::MACADDR8);
+    mapping.insert(IP_FAMILY_TYPE_STR.to_string(), Type::IP_FAMILY);
     mapping.insert("[]".to_string(), Type::list(Arc::new(Type::ANY)));
     mapping.insert("[any]".to_string(), Type::list(Arc::new(Type::ANY)));
     mapping.insert("[str]".to_string(), Type::list(Arc::new(Type::STR)));
@@ -130,6 +147,39 @@ impl Type {
     pub const NONE: Type = Type {
         kind: TypeKind::None,
         flags: TypeFlags::NONE,
+        is_type_alias: false,
+    };
+
+    // F1.2: mokkan native type constants.
+
+    /// Type constant `cidr`.
+    pub const CIDR: Type = Type {
+        kind: TypeKind::Cidr,
+        flags: TypeFlags::CIDR,
+        is_type_alias: false,
+    };
+    /// Type constant `inet`.
+    pub const INET: Type = Type {
+        kind: TypeKind::Inet,
+        flags: TypeFlags::INET,
+        is_type_alias: false,
+    };
+    /// Type constant `macaddr`.
+    pub const MACADDR: Type = Type {
+        kind: TypeKind::Macaddr,
+        flags: TypeFlags::MACADDR,
+        is_type_alias: false,
+    };
+    /// Type constant `macaddr8`.
+    pub const MACADDR8: Type = Type {
+        kind: TypeKind::Macaddr8,
+        flags: TypeFlags::MACADDR8,
+        is_type_alias: false,
+    };
+    /// Type constant `IpFamily`.
+    pub const IP_FAMILY: Type = Type {
+        kind: TypeKind::IpFamily,
+        flags: TypeFlags::IP_FAMILY,
         is_type_alias: false,
     };
 }
