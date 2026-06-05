@@ -66,6 +66,9 @@ pub mod val_attr;
 pub mod val_type;
 pub use val_type::*;
 
+pub mod inet;
+pub use inet::*;
+
 pub mod val_union;
 pub use val_union::*;
 

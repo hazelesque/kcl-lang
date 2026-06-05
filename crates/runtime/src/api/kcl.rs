@@ -168,6 +168,18 @@ impl Hash for ValueRef {
             Value::func_value(v) => {
                 v.fn_ptr.hash(state);
             }
+            // F1.1: mokkan native network types. Hash via the
+            // canonical text form for inet types (cheap, stable
+            // across IPv4/IPv6) and the byte array for MACs. The
+            // hash needs only consistency with PartialEq; the
+            // text form satisfies that for the cidr crate's
+            // IpCidr/IpInet (both derive Hash but we route through
+            // text to be explicit about canonicality).
+            Value::cidr_value(v) => v.hash(state),
+            Value::inet_value(v) => v.hash(state),
+            Value::macaddr_value(v) => v.as_bytes().hash(state),
+            Value::macaddr8_value(v) => v.as_bytes().hash(state),
+            Value::ip_family_value(v) => v.hash(state),
         }
     }
 }
@@ -213,6 +225,18 @@ pub enum Value {
     schema_value(Box<SchemaValue>),
     func_value(Box<FuncValue>),
     unit_value(f64, i64, String), // (Real value, raw value, unit string)
+
+    // Mokkan native network types (F1.1). Resolved-only at F1; F2's
+    // dual-state refactor will box these into wrapper types carrying
+    // either the resolved value or a symbolic IR tree. Direct
+    // payloads here because they're small enough (24-32 bytes
+    // each) to inline without growing the enum's stack footprint
+    // beyond what the existing schema/func variants already imply.
+    cidr_value(cidr::IpCidr),
+    inet_value(cidr::IpInet),
+    macaddr_value(macaddr::MacAddr6),
+    macaddr8_value(macaddr::MacAddr8),
+    ip_family_value(crate::value::IpFamily),
 }
 
 #[derive(PartialEq, Eq, Clone, Default, Debug)]
@@ -434,6 +458,12 @@ pub enum Kind {
     StrLit = 16,
     Unit = 17,
     Func = 18,
+    // F1.1: mokkan native network types. Coarser than the Value
+    // variants — runtime dispatch via C ABI only needs the
+    // family-level distinction.
+    Inet = 19,     // covers both cidr_value and inet_value
+    MacAddr = 20,  // covers macaddr_value and macaddr8_value
+    IpFamily = 21,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Default)]

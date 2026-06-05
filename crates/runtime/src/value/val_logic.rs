@@ -17,6 +17,16 @@ impl ValueRef {
             Value::schema_value(v) => !v.config.values.is_empty(),
             Value::func_value(_) => true,
             Value::unit_value(v, _, _) => *v != 0.0,
+            // F1.1: mokkan native types are always truthy when
+            // present. There's no meaningful "empty cidr" or "zero
+            // inet" — a parsed value exists or it doesn't. (Bare
+            // 0.0.0.0/0 or 0.0.0.0 are valid network/host values
+            // and not "falsy".)
+            Value::cidr_value(_) => true,
+            Value::inet_value(_) => true,
+            Value::macaddr_value(_) => true,
+            Value::macaddr8_value(_) => true,
+            Value::ip_family_value(_) => true,
         }
     }
 

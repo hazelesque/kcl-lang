@@ -62,6 +62,23 @@ impl ValueRef {
                 dict.set_potential_schema_type(&v.potential_schema.clone().unwrap_or_default());
                 dict
             }
+            // F1.1: mokkan native types are Copy-like; deep_copy is
+            // just a constructor with the same payload.
+            Value::cidr_value(v) => ValueRef {
+                rc: Rc::new(RefCell::new(Value::cidr_value(*v))),
+            },
+            Value::inet_value(v) => ValueRef {
+                rc: Rc::new(RefCell::new(Value::inet_value(*v))),
+            },
+            Value::macaddr_value(v) => ValueRef {
+                rc: Rc::new(RefCell::new(Value::macaddr_value(*v))),
+            },
+            Value::macaddr8_value(v) => ValueRef {
+                rc: Rc::new(RefCell::new(Value::macaddr8_value(*v))),
+            },
+            Value::ip_family_value(v) => ValueRef {
+                rc: Rc::new(RefCell::new(Value::ip_family_value(*v))),
+            },
             Value::schema_value(v) => {
                 let mut dict = ValueRef::from(Value::dict_value(Box::new(DictValue::new(&[]))));
                 dict.set_potential_schema_type(

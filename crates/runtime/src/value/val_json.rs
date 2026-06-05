@@ -545,6 +545,20 @@ impl ValueRef {
                 JsonValue::Object(val_map)
             }
             crate::Value::func_value(v) => JsonValue::Number(serde_json::Number::from(v.fn_ptr)),
+            // F1.1: mokkan native types serialise as JSON strings
+            // via their canonical Display form. cidr/inet produce
+            // CIDR/inet text ("10.0.0.0/24", "10.0.5.1/24"); MAC
+            // addresses produce canonical EUI-48/EUI-64 text;
+            // IpFamily emits "V4" or "V6" verbatim (matches the
+            // mokkan source-form constant name). This keeps JSON
+            // output deterministic and human-readable; round-trip
+            // back through schema-validation parsing works via
+            // F1.3's str→type coercion.
+            crate::Value::cidr_value(v) => JsonValue::String(v.to_string()),
+            crate::Value::inet_value(v) => JsonValue::String(v.to_string()),
+            crate::Value::macaddr_value(v) => JsonValue::String(v.to_string()),
+            crate::Value::macaddr8_value(v) => JsonValue::String(v.to_string()),
+            crate::Value::ip_family_value(v) => JsonValue::String(v.to_string()),
         }
     }
 }

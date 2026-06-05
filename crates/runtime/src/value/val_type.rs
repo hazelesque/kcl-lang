@@ -34,6 +34,16 @@ pub const KCL_NAME_CONSTANTS: [&str; 4] = [
     KCL_NAME_CONSTANT_FALSE,
 ];
 pub const NUMBER_MULTIPLIER_TYPE: &str = "units.NumberMultiplier";
+
+// F1.2: mokkan native type names. Registered as built-in named
+// types in sema/resolver parallel to `int`/`str`. Schema authors
+// write `field: cidr` / `field: inet` / etc.; coercion from `str`
+// happens at schema-validation time (F1.3).
+pub const MOKKAN_TYPE_CIDR: &str = "cidr";
+pub const MOKKAN_TYPE_INET: &str = "inet";
+pub const MOKKAN_TYPE_MACADDR: &str = "macaddr";
+pub const MOKKAN_TYPE_MACADDR8: &str = "macaddr8";
+pub const MOKKAN_TYPE_IP_FAMILY: &str = "IpFamily";
 pub const NUMBER_MULTIPLIER_REGEX: &str =
     r"^([1-9][0-9]{0,63})(E|P|T|G|M|K|k|m|u|n|Ei|Pi|Ti|Gi|Mi|Ki)$";
 
@@ -66,6 +76,11 @@ impl ValueRef {
                     String::from(KCL_TYPE_TYPE)
                 }
             }
+            Value::cidr_value(..) => String::from(MOKKAN_TYPE_CIDR),
+            Value::inet_value(..) => String::from(MOKKAN_TYPE_INET),
+            Value::macaddr_value(..) => String::from(MOKKAN_TYPE_MACADDR),
+            Value::macaddr8_value(..) => String::from(MOKKAN_TYPE_MACADDR8),
+            Value::ip_family_value(..) => String::from(MOKKAN_TYPE_IP_FAMILY),
         }
     }
 }

@@ -1022,6 +1022,16 @@ impl fmt::Display for ValueRef {
                 write!(f, "{{{}}}", values.join(", "))
             }
             Value::func_value(_) => write!(f, "function"),
+            // F1.1: mokkan native types display via their underlying
+            // crate's Display impl — canonical text form. `cidr` /
+            // `macaddr` crates already produce the expected
+            // canonical strings ("10.0.0.0/24", "10.0.5.1/24",
+            // "02:00:00:aa:bb:cc"). IpFamily formats as "V4" / "V6".
+            Value::cidr_value(v) => write!(f, "{v}"),
+            Value::inet_value(v) => write!(f, "{v}"),
+            Value::macaddr_value(v) => write!(f, "{v}"),
+            Value::macaddr8_value(v) => write!(f, "{v}"),
+            Value::ip_family_value(v) => write!(f, "{v}"),
         }
     }
 }
