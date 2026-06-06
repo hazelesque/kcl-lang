@@ -755,6 +755,47 @@ fn mokkan_string_coercion_strict_cidr_rejects_host_bits_set() {
     );
 }
 
+/// F1.4 — `mokkan.net` package registration. `import mokkan.net`
+/// binds `net` into scope (KCL leaf-binding); `net.V4` / `net.V6`
+/// surface as typed `IpFamily` values; `net.broadcast(inet)`
+/// invokes the typed-algebra builtin and returns a typed
+/// `inet_value`.
+#[test]
+fn mokkan_net_package_v4_v6_constants_and_broadcast() {
+    let ready = Embedded::new().build();
+    let outcome = ready
+        .evaluate(EvaluateArgs {
+            main_source: concat!(
+                "import mokkan.net\n",
+                "\n",
+                "schema NetCfg:\n",
+                "    fam_v4: IpFamily\n",
+                "    fam_v6: IpFamily\n",
+                "    bcast_v4: inet\n",
+                "\n",
+                "cfg = NetCfg {\n",
+                "    fam_v4 = net.V4\n",
+                "    fam_v6 = net.V6\n",
+                "    bcast_v4 = net.broadcast(\"10.0.0.1/24\")\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        })
+        .expect("import mokkan.net + use of V4/V6/broadcast should evaluate cleanly");
+
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+    let fam_v4 = cfg.dict_get_value("fam_v4").unwrap();
+    assert_eq!(fam_v4.type_str(), "IpFamily");
+    assert_eq!(format!("{fam_v4}"), "V4");
+    let fam_v6 = cfg.dict_get_value("fam_v6").unwrap();
+    assert_eq!(format!("{fam_v6}"), "V6");
+    let bcast = cfg.dict_get_value("bcast_v4").unwrap();
+    assert_eq!(bcast.type_str(), "inet");
+    // 10.0.0.1/24 — broadcast for the /24 is 10.0.0.255/24.
+    assert_eq!(format!("{bcast}"), "10.0.0.255/24");
+}
+
 /// F1.3 — `str → inet` is lenient. Same "10.0.5.1/24" value that
 /// `cidr` rejects above parses cleanly into an `inet`.
 #[test]

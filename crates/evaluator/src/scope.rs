@@ -417,13 +417,20 @@ impl<'ctx> Evaluator<'ctx> {
                 } else {
                     self.float_value(value_float)
                 }
+            } else if pkgpath == builtin::system_module::MOKKAN_NET
+                && builtin::system_module::MOKKAN_NET_FIELD_NAMES.contains(&name)
+            {
+                // F1.4: mokkan.net.V4 / V6 surface as typed
+                // IpFamily values. Parallel to the UNITS_FIELD_NAMES
+                // case above — same mechanism, different value type.
+                let family = match name {
+                    builtin::system_module::MOKKAN_NET_V4 => kcl_runtime::IpFamily::V4,
+                    builtin::system_module::MOKKAN_NET_V6 => kcl_runtime::IpFamily::V6,
+                    _ => unreachable!("MOKKAN_NET_FIELD_NAMES guards this branch"),
+                };
+                ValueRef::from(kcl_runtime::Value::ip_family_value(family))
             } else {
-                let func_name = format!(
-                    "{}{}_{}",
-                    builtin::KCL_SYSTEM_MODULE_MANGLE_PREFIX,
-                    pkgpath,
-                    name
-                );
+                let func_name = builtin::mangle_system_module_func(pkgpath, name);
                 let function_ptr = kcl_get_fn_ptr_by_name(&func_name);
                 self.function_value_with_ptr(function_ptr)
             }
@@ -507,13 +514,20 @@ impl<'ctx> Evaluator<'ctx> {
                 } else {
                     self.float_value(value_float)
                 }
+            } else if pkgpath == builtin::system_module::MOKKAN_NET
+                && builtin::system_module::MOKKAN_NET_FIELD_NAMES.contains(&name)
+            {
+                // F1.4: mokkan.net.V4 / V6 surface as typed
+                // IpFamily values. Parallel to the UNITS_FIELD_NAMES
+                // case above — same mechanism, different value type.
+                let family = match name {
+                    builtin::system_module::MOKKAN_NET_V4 => kcl_runtime::IpFamily::V4,
+                    builtin::system_module::MOKKAN_NET_V6 => kcl_runtime::IpFamily::V6,
+                    _ => unreachable!("MOKKAN_NET_FIELD_NAMES guards this branch"),
+                };
+                ValueRef::from(kcl_runtime::Value::ip_family_value(family))
             } else {
-                let func_name = format!(
-                    "{}{}_{}",
-                    builtin::KCL_SYSTEM_MODULE_MANGLE_PREFIX,
-                    pkgpath,
-                    name
-                );
+                let func_name = builtin::mangle_system_module_func(pkgpath, name);
                 let function_ptr = kcl_get_fn_ptr_by_name(&func_name);
                 self.function_value_with_ptr(function_ptr)
             }

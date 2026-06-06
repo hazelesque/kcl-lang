@@ -191,6 +191,9 @@ pub fn kcl_get_fn_ptr_by_name(name: &str) -> u64 {
         "kcl_math_modf" => crate::kcl_math_modf as *const () as u64,
         "kcl_math_pow" => crate::kcl_math_pow as *const () as u64,
         "kcl_math_sqrt" => crate::kcl_math_sqrt as *const () as u64,
+        // F1.4: mokkan.net package. Function name mangling at
+        // mangle_system_module_func in sema/builtin/mod.rs.
+        "kcl_mokkan_net_broadcast" => crate::kcl_mokkan_net_broadcast as *const () as u64,
         "kcl_net_CIDR_host" => crate::kcl_net_CIDR_host as *const () as u64,
         "kcl_net_CIDR_netmask" => crate::kcl_net_CIDR_netmask as *const () as u64,
         "kcl_net_CIDR_subnet" => crate::kcl_net_CIDR_subnet as *const () as u64,

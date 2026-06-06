@@ -2394,9 +2394,79 @@ register_runtime_member! {
     )
 }
 
+// ------------------------------
+// mokkan.net system package (F1.4)
+// ------------------------------
+//
+// Typed inet algebra (PostgreSQL-shaped) replacing the upstream
+// stringly-typed `net` package. Operators write
+// `import mokkan.net` (KCL leaf-binding gives `net` in scope) and
+// call `net.broadcast(addr)`, `net.contains(a, b)`, etc. The
+// `V4` / `V6` constants on this package surface as typed
+// `IpFamily` values via the FIELD_NAMES table — pattern parallels
+// `UNITS_FIELD_NAMES` at line ~1740. Per D6/D6a, family is the
+// only enum-shaped builtin so we keep the field-table mechanism
+// targeted; no need to grow a general enum facility yet.
+
+pub const MOKKAN_NET: &str = "mokkan.net";
+pub const MOKKAN_NET_V4: &str = "V4";
+pub const MOKKAN_NET_V6: &str = "V6";
+pub const MOKKAN_NET_FIELD_NAMES: &[&str] = &[MOKKAN_NET_V4, MOKKAN_NET_V6];
+
+macro_rules! register_mokkan_net_member {
+    ($($name:ident => $ty:expr)*) => (
+        pub static MOKKAN_NET_FUNCTION_TYPES: Lazy<IndexMap<String, Type>> = Lazy::new(|| {
+            let mut builtin_mapping = IndexMap::default();
+            $( builtin_mapping.insert(stringify!($name).to_string(), $ty); )*
+            builtin_mapping
+        });
+        pub const MOKKAN_NET_FUNCTION_NAMES: &[&str] = &[
+            $( stringify!($name), )*
+        ];
+    )
+}
+register_mokkan_net_member! {
+    // F1.4 single-function trial run — broadcast(inet) -> inet.
+    // The rest of the PG algebra (host, network, masklen,
+    // set_masklen, netmask, hostmask, family, text, abbrev,
+    // inet_merge, contains, contained_by, contains_eq, overlaps,
+    // inet_same_family) lands in the bulk-add follow-up.
+    broadcast => Type::function(
+        None,
+        Type::inet_ref(),
+        &[
+            Parameter {
+                name: "addr".to_string(),
+                ty: Type::inet_ref(),
+                has_default: false,
+                default_value: None,
+                range: dummy_range(),
+            },
+        ],
+        r#"PostgreSQL `broadcast(inet)`: the broadcast address of an inet's enclosing network."#,
+        false,
+        None,
+    )
+}
+
 pub const STANDARD_SYSTEM_MODULES: &[&str] = &[
-    COLLECTION, NET, MANIFESTS, MATH, DATETIME, REGEX, YAML, JSON, CRYPTO, BASE64, UNITS, FILE,
-    TEMPLATE, RUNTIME, BASE32,
+    COLLECTION,
+    NET,
+    MANIFESTS,
+    MATH,
+    DATETIME,
+    REGEX,
+    YAML,
+    JSON,
+    CRYPTO,
+    BASE64,
+    UNITS,
+    FILE,
+    TEMPLATE,
+    RUNTIME,
+    BASE32,
+    // F1.4: mokkan native packages.
+    MOKKAN_NET,
 ];
 
 pub const STANDARD_SYSTEM_MODULE_NAMES_WITH_AT: &[&str] = &[
@@ -2415,6 +2485,7 @@ pub const STANDARD_SYSTEM_MODULE_NAMES_WITH_AT: &[&str] = &[
     "@template",
     "@runtime",
     "@base32",
+    "@mokkan.net",
 ];
 
 /// Get the system module members
@@ -2439,6 +2510,13 @@ pub fn get_system_module_members(name: &str) -> Vec<&str> {
         FILE => FILE_FUNCTION_NAMES.to_vec(),
         TEMPLATE => TEMPLATE_FUNCTION_NAMES.to_vec(),
         RUNTIME => RUNTIME_FUNCTION_NAMES.to_vec(),
+        // F1.4: mokkan.net carries both functions and the
+        // `V4`/`V6` constants — same shape as `units`.
+        MOKKAN_NET => {
+            let mut members = MOKKAN_NET_FUNCTION_NAMES.to_vec();
+            members.append(&mut MOKKAN_NET_FIELD_NAMES.to_vec());
+            members
+        }
         _ => bug!("invalid system module name '{}'", name),
     }
 }
@@ -2504,6 +2582,11 @@ pub fn get_system_member_function_ty(name: &str, func: &str) -> TypeRef {
         }
         RUNTIME => {
             let types = &RUNTIME_FUNCTION_TYPES;
+            types.get(func).cloned()
+        }
+        // F1.4: typed inet algebra signatures.
+        MOKKAN_NET => {
+            let types = &MOKKAN_NET_FUNCTION_TYPES;
             types.get(func).cloned()
         }
         _ => None,

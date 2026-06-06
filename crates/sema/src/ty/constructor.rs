@@ -21,6 +21,33 @@ impl Type {
     pub fn str_ref() -> TypeRef {
         Arc::new(Type::STR)
     }
+    // F1.4: mokkan native type references. Parallel to int_ref /
+    // str_ref above so the `register_mokkan_net_member!` algebra
+    // signatures read naturally:
+    //   broadcast(addr: inet_ref) -> inet_ref
+    //   network(addr: inet_ref) -> cidr_ref
+    //   family(addr: inet_ref) -> ip_family_ref
+    // etc.
+    #[inline]
+    pub fn cidr_ref() -> TypeRef {
+        Arc::new(Type::CIDR)
+    }
+    #[inline]
+    pub fn inet_ref() -> TypeRef {
+        Arc::new(Type::INET)
+    }
+    #[inline]
+    pub fn macaddr_ref() -> TypeRef {
+        Arc::new(Type::MACADDR)
+    }
+    #[inline]
+    pub fn macaddr8_ref() -> TypeRef {
+        Arc::new(Type::MACADDR8)
+    }
+    #[inline]
+    pub fn ip_family_ref() -> TypeRef {
+        Arc::new(Type::IP_FAMILY)
+    }
     /// Construct a any type reference.
     #[inline]
     pub fn any_ref() -> TypeRef {

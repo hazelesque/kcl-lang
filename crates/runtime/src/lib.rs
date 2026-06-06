@@ -115,6 +115,10 @@ pub use self::panic::*;
 pub mod addr;
 pub use self::addr::*;
 
+// F1.4: mokkan native packages.
+pub mod mokkan_net;
+pub use self::mokkan_net::*;
+
 #[derive(Debug, Default, Clone)]
 pub struct RuntimePanicRecord {
     pub kcl_panic_info: bool,

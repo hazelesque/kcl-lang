@@ -20,6 +20,26 @@ pub const KCL_BUILTIN_FUNCTION_MANGLE_PREFIX: &str = "kcl_builtin";
 pub const KCL_SYSTEM_MODULE_MANGLE_PREFIX: &str = "kcl_";
 pub const BUILTIN_FUNCTION_PREFIX: &str = "$builtin";
 
+/// Mangle a system-module-qualified function name into the linker
+/// symbol the runtime exposes. Single-segment packages stay
+/// straight concatenation (`net.split_host_port` →
+/// `kcl_net_split_host_port`); dotted packages substitute `.`
+/// with `_` so the resulting symbol is a valid Rust identifier
+/// (`mokkan.net.broadcast` → `kcl_mokkan_net_broadcast`).
+///
+/// F1.4 introduces dotted system-module names; this helper
+/// centralises the substitution so both the variable-resolution
+/// and function-resolution paths in the evaluator stay consistent.
+#[inline]
+pub fn mangle_system_module_func(pkgpath: &str, name: &str) -> String {
+    format!(
+        "{}{}_{}",
+        KCL_SYSTEM_MODULE_MANGLE_PREFIX,
+        pkgpath.replace('.', "_"),
+        name,
+    )
+}
+
 macro_rules! register_builtin {
     ($($name:ident => $ty:expr)*) => (
         // Builtin function map.
