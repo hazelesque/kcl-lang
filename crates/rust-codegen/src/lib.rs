@@ -586,6 +586,106 @@ mod tests {
         );
     }
 
+    /// F2.7b end-to-end: KCL schema declaring
+    /// `T | ResolvableString` round-trips through parser + sema +
+    /// IR + emitter to a `kcl_embed::resolve::Resolvable<T>` field.
+    /// Asserts the field shape, the TryFrom body uses
+    /// `from_resolvable`, and collection shapes nest the Resolvable
+    /// at the inner-element layer.
+    #[test]
+    fn analyse_and_generate_resolvable_string_unions() {
+        let src = concat!(
+            "schema Cfg:\n",
+            "    command: str | ResolvableString\n",
+            "    subnet: cidr | ResolvableString\n",
+            "    inline: [str | ResolvableString]\n",
+            "    labels: {str: str | ResolvableString}\n",
+        );
+        let module = analyse_inline_source(src).expect("analyse");
+        let fields = &module.schemas[0].fields;
+        // command: str | RS → Resolvable<Str>
+        assert!(
+            matches!(
+                &fields[0].kind,
+                FieldKind::Resolvable(inner) if matches!(**inner, FieldKind::Str)
+            ),
+            "command should be Resolvable<Str>, got {:?}",
+            fields[0].kind
+        );
+        // subnet: cidr | RS → Resolvable<Cidr>
+        assert!(
+            matches!(
+                &fields[1].kind,
+                FieldKind::Resolvable(inner) if matches!(**inner, FieldKind::Cidr)
+            ),
+            "subnet should be Resolvable<Cidr>, got {:?}",
+            fields[1].kind
+        );
+        // inline: [str | RS] → List<Resolvable<Str>>
+        assert!(
+            matches!(
+                &fields[2].kind,
+                FieldKind::List(inner) if matches!(
+                    &**inner,
+                    FieldKind::Resolvable(t) if matches!(**t, FieldKind::Str)
+                )
+            ),
+            "inline should be List<Resolvable<Str>>, got {:?}",
+            fields[2].kind
+        );
+        // labels: {str: str | RS} → Dict<Str, Resolvable<Str>>
+        assert!(
+            matches!(
+                &fields[3].kind,
+                FieldKind::Dict(k, v) if matches!(**k, FieldKind::Str) && matches!(
+                    &**v,
+                    FieldKind::Resolvable(t) if matches!(**t, FieldKind::Str)
+                )
+            ),
+            "labels should be Dict<Str, Resolvable<Str>>, got {:?}",
+            fields[3].kind
+        );
+
+        let out = generate_to_string(src).expect("generate");
+        assert!(
+            out.contains("pub command: kcl_embed::resolve::Resolvable<String>,"),
+            "Resolvable<String> field:\n{out}"
+        );
+        assert!(
+            out.contains("pub subnet: kcl_embed::resolve::Resolvable<cidr::IpCidr>,"),
+            "Resolvable<IpCidr> field:\n{out}"
+        );
+        assert!(
+            out.contains("pub inline: Vec<kcl_embed::resolve::Resolvable<String>>,"),
+            "Vec<Resolvable<String>> field:\n{out}"
+        );
+        assert!(
+            out.contains(
+                "pub labels: std::collections::HashMap<String, kcl_embed::resolve::Resolvable<String>>,"
+            ),
+            "HashMap<String, Resolvable<String>> field:\n{out}"
+        );
+        // TryFrom dispatch uses from_resolvable.
+        assert!(
+            out.contains("_kcl_codegen_helpers::from_resolvable"),
+            "TryFrom should use from_resolvable:\n{out}"
+        );
+    }
+
+    /// F2.7b — three-arm union with ResolvableString refuses to
+    /// codegen with a clear error pointing at the constraint
+    /// (split into separate fields, or write Rust by hand).
+    #[test]
+    fn three_arm_union_with_resolvable_string_refused() {
+        let src = concat!("schema Cfg:\n", "    weird: int | str | ResolvableString\n",);
+        let err = generate_to_string(src).expect_err("should refuse 3-arm RS union");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("ResolvableString") && msg.contains("two arms"),
+            "expected scope-mismatch diagnostic, got: {msg}"
+        );
+    }
+
     /// Lifted enum name collision: a schema literally named the same
     /// as a discriminator's PascalCase concat would emit two `pub`
     /// items with the same identifier. Codegen detects this and

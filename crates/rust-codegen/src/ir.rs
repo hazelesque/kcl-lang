@@ -180,6 +180,14 @@ pub enum FieldKind {
     /// post-F2 `kcl_*` → `mokkan_*` crate rename; regenerated code
     /// picks up the new path at re-codegen time.)
     IpFamily,
+    /// F2.7b: `T | ResolvableString` union shape. Codegen emits as
+    /// `kcl_embed::resolve::Resolvable<T>` and the generated
+    /// TryFrom dispatches on `is_resolvable_string` to pick the
+    /// Pending arm (segment list preserved) vs. the Resolved arm
+    /// (inner FieldKind's TryFrom). Box keeps the FieldKind enum's
+    /// stack footprint manageable; the inner kind is the T from
+    /// the union.
+    Resolvable(Box<FieldKind>),
     /// A kind the Phase 4 MVP doesn't yet handle. Carries a
     /// descriptive label so codegen errors point at the actual
     /// unsupported shape rather than `Unknown`.
@@ -208,6 +216,9 @@ impl FieldKind {
             FieldKind::Macaddr => "macaddr::MacAddr6".to_string(),
             FieldKind::Macaddr8 => "macaddr::MacAddr8".to_string(),
             FieldKind::IpFamily => "kcl_runtime::IpFamily".to_string(),
+            FieldKind::Resolvable(inner) => {
+                format!("kcl_embed::resolve::Resolvable<{}>", inner.to_rust_type())
+            }
             FieldKind::Unsupported(label) => format!("/* UNSUPPORTED: {label} */ ()"),
         }
     }
@@ -225,6 +236,7 @@ impl FieldKind {
             FieldKind::Unsupported(_) => true,
             FieldKind::List(inner) => inner.has_unsupported(),
             FieldKind::Dict(k, v) => k.has_unsupported() || v.has_unsupported(),
+            FieldKind::Resolvable(inner) => inner.has_unsupported(),
             _ => false,
         }
     }
@@ -248,6 +260,7 @@ impl FieldKind {
             FieldKind::Float => true,
             FieldKind::List(inner) => inner.contains_float(),
             FieldKind::Dict(k, v) => k.contains_float() || v.contains_float(),
+            FieldKind::Resolvable(inner) => inner.contains_float(),
             _ => false,
         }
     }
@@ -771,6 +784,66 @@ fn field_kind_for(
             "function-typed field (D4 corollary: codegen-time error)".to_string(),
         ),
         TypeKind::Union(members) => {
+            // F2.7b: `T | ResolvableString` — the transparent-
+            // resolvable shape. Detect first because it takes
+            // priority over the string-literal-union path; a
+            // schema can't realistically declare
+            // `ResolvableString | "lit"` so there's no overlap.
+            //
+            // Recognition: exactly two arms, exactly one is
+            // ResolvableString, the other is an emittable non-
+            // union type. Three-or-more-arm unions including
+            // ResolvableString (e.g. `int | str | RS`) refuse to
+            // codegen — the inner T isn't unambiguous.
+            let resolvable_count = members.iter().filter(|m| m.is_resolvable_string()).count();
+            if resolvable_count > 0 {
+                if members.len() != 2 || resolvable_count != 1 {
+                    return FieldKind::Unsupported(format!(
+                        "union with ResolvableString must have exactly two arms (one of which \
+                         is ResolvableString, the other being the T type). Got {}-arm union: \
+                         {}. Three-or-more-arm unions including ResolvableString aren't \
+                         supported at F2.7 — split into separate fields, or write the Rust \
+                         type by hand.",
+                        members.len(),
+                        members
+                            .iter()
+                            .map(|m| m.ty_str())
+                            .collect::<Vec<_>>()
+                            .join(" | "),
+                    ));
+                }
+                // Find the non-RS arm — that's T.
+                let other_ty = members
+                    .iter()
+                    .find(|m| !m.is_resolvable_string())
+                    .expect("resolvable_count == 1 + len == 2 → exactly one non-RS arm exists");
+                let inner = field_kind_for(&other_ty.kind, schema_name, field_name, module);
+                if inner.is_unsupported() {
+                    return FieldKind::Unsupported(format!(
+                        "`T | ResolvableString` field where T is itself unsupported: {}",
+                        inner.describe()
+                    ));
+                }
+                if matches!(inner, FieldKind::List(_) | FieldKind::Dict(..)) {
+                    // The plan permits `[str | ResolvableString]`
+                    // (collection of Resolvable<String>) but not
+                    // `[str] | ResolvableString` (a collection-or-
+                    // string union shape); the latter is ambiguous.
+                    // The shape we're rejecting here is the OUTER
+                    // union arm being a collection, which the
+                    // recognition above would surface as
+                    // `Vec<T> | ResolvableString` — not a sensible
+                    // operator declaration.
+                    return FieldKind::Unsupported(
+                        "`T | ResolvableString` where T is a collection (List/Dict): \
+                         the operator probably wants `[T | ResolvableString]` (each entry \
+                         resolvable) instead of `[T] | ResolvableString` (whole list \
+                         OR a deferred string)."
+                            .to_string(),
+                    );
+                }
+                return FieldKind::Resolvable(Box::new(inner));
+            }
             // String-literal union: `"a" | "b" | "c"`. Codegen lifts
             // this to a named Rust enum at module scope and the field
             // becomes a reference to that enum.

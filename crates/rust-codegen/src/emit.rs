@@ -102,6 +102,24 @@ mod _kcl_codegen_helpers {
         }
     }
 
+    // F2.7b: dispatch ValueRef → Resolvable<T>. The Pending arm
+    // catches ResolvableString-shaped values (produced by symbolic
+    // builtins or the F2.4 stringification/concat propagation);
+    // anything else falls through to the inner T converter (the
+    // eager Resolved arm).
+    pub fn from_resolvable<T, F>(
+        v: &ValueRef,
+        conv: F,
+    ) -> Result<kcl_embed::resolve::Resolvable<T>, String>
+    where
+        F: FnOnce(&ValueRef) -> Result<T, String>,
+    {
+        if let Some(rs) = kcl_embed::resolve::as_resolvable_string(v) {
+            return Ok(kcl_embed::resolve::Resolvable::Pending(rs));
+        }
+        conv(v).map(kcl_embed::resolve::Resolvable::Resolved)
+    }
+
     pub fn require<T, F>(
         v: &ValueRef,
         field: &str,
@@ -566,6 +584,17 @@ fn emit_conv_closure(kind: &FieldKind) -> String {
         FieldKind::Macaddr => "_kcl_codegen_helpers::from_macaddr".to_string(),
         FieldKind::Macaddr8 => "_kcl_codegen_helpers::from_macaddr8".to_string(),
         FieldKind::IpFamily => "_kcl_codegen_helpers::from_ip_family".to_string(),
+        FieldKind::Resolvable(inner) => {
+            // F2.7b: dispatch on `is_resolvable_string` first
+            // (Pending arm), fall through to the inner T's
+            // conversion (Resolved arm). The inner conversion
+            // closure is the same one any non-RS field would use,
+            // wrapped in `Resolvable::Resolved(...)`.
+            let inner_conv = emit_conv_closure(inner);
+            format!(
+                "|f: &kcl_runtime::ValueRef| _kcl_codegen_helpers::from_resolvable(f, {inner_conv})"
+            )
+        }
         FieldKind::Unsupported(label) => {
             format!("compile_error!(\"unsupported field kind: {label}\")")
         }
@@ -801,6 +830,93 @@ mod tests {
         assert!(
             out.contains("pub by_name: std::collections::HashMap<String, cidr::IpInet>,"),
             "dict of inet:\n{out}"
+        );
+    }
+
+    /// F2.7b — `T | ResolvableString` field emits as
+    /// `kcl_embed::resolve::Resolvable<T>` with TryFrom body using
+    /// `from_resolvable` to dispatch on the Pending arm before
+    /// falling through to the inner T conversion.
+    #[test]
+    fn emit_resolvable_string_field_emits_resolvable_t() {
+        let module = module_with_schemas(vec![schema_ir_for(
+            "Cfg",
+            vec![
+                FieldIR {
+                    name: "command".into(),
+                    kind: FieldKind::Resolvable(Box::new(FieldKind::Str)),
+                    optional: false,
+                    has_default: false,
+                },
+                FieldIR {
+                    name: "subnet".into(),
+                    kind: FieldKind::Resolvable(Box::new(FieldKind::Cidr)),
+                    optional: false,
+                    has_default: false,
+                },
+            ],
+        )]);
+        let out = emit_rust_source(&module).expect("emit");
+        assert!(
+            out.contains("pub command: kcl_embed::resolve::Resolvable<String>,"),
+            "Resolvable<String> field:\n{out}"
+        );
+        assert!(
+            out.contains("pub subnet: kcl_embed::resolve::Resolvable<cidr::IpCidr>,"),
+            "Resolvable<IpCidr> field:\n{out}"
+        );
+        // TryFrom body dispatches via from_resolvable wrapping the
+        // inner T converter.
+        assert!(
+            out.contains("_kcl_codegen_helpers::from_resolvable"),
+            "TryFrom body should use from_resolvable:\n{out}"
+        );
+    }
+
+    /// F2.7b — collection shape `[T | ResolvableString]` emits as
+    /// `Vec<Resolvable<T>>`. The Resolvable layer goes on the
+    /// inner element type, not the collection itself.
+    #[test]
+    fn emit_resolvable_string_in_list_emits_vec_of_resolvable_t() {
+        let module = module_with_schemas(vec![schema_ir_for(
+            "ProvisionStep",
+            vec![FieldIR {
+                name: "inline".into(),
+                kind: FieldKind::List(Box::new(FieldKind::Resolvable(Box::new(FieldKind::Str)))),
+                optional: false,
+                has_default: false,
+            }],
+        )]);
+        let out = emit_rust_source(&module).expect("emit");
+        assert!(
+            out.contains("pub inline: Vec<kcl_embed::resolve::Resolvable<String>>,"),
+            "Vec<Resolvable<String>>:\n{out}"
+        );
+    }
+
+    /// F2.7b — collection shape `{str: T | ResolvableString}` emits
+    /// as `HashMap<String, Resolvable<T>>`. Same Resolvable-inner
+    /// shape as the list case.
+    #[test]
+    fn emit_resolvable_string_in_dict_emits_hashmap_of_resolvable_t() {
+        let module = module_with_schemas(vec![schema_ir_for(
+            "Tags",
+            vec![FieldIR {
+                name: "labels".into(),
+                kind: FieldKind::Dict(
+                    Box::new(FieldKind::Str),
+                    Box::new(FieldKind::Resolvable(Box::new(FieldKind::Str))),
+                ),
+                optional: false,
+                has_default: false,
+            }],
+        )]);
+        let out = emit_rust_source(&module).expect("emit");
+        assert!(
+            out.contains(
+                "pub labels: std::collections::HashMap<String, kcl_embed::resolve::Resolvable<String>>,"
+            ),
+            "HashMap<String, Resolvable<String>>:\n{out}"
         );
     }
 }

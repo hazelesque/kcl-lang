@@ -852,7 +852,11 @@ fn type_to_item_kind(ty: &Type) -> Option<KCLCompletionItemKind> {
         | TypeKind::Inet
         | TypeKind::Macaddr
         | TypeKind::Macaddr8
-        | TypeKind::IpFamily => Some(KCLCompletionItemKind::Variable),
+        | TypeKind::IpFamily
+        // F2.6: ResolvableString same shape as the other mokkan
+        // primitives for LSP — it's just a value-shaped builtin
+        // named type from the completion's perspective.
+        | TypeKind::ResolvableString => Some(KCLCompletionItemKind::Variable),
         TypeKind::Schema(_) => Some(KCLCompletionItemKind::Schema),
         TypeKind::Function(_) => Some(KCLCompletionItemKind::Function),
         TypeKind::Module(_) => Some(KCLCompletionItemKind::Module),
