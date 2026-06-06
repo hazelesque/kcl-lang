@@ -1137,3 +1137,73 @@ fn mokkan_inet_cidr_ordering() {
         );
     }
 }
+
+/// F1.6 — the `as_cidr` / `as_inet` / `as_macaddr` / `as_macaddr8`
+/// / `as_ip_family` `ValueRef` accessors used by codegen-emitted
+/// `TryFrom<&ValueRef>` bodies. Each pulls a typed value of the
+/// crate type the F1.6 codegen surface promises.
+#[test]
+fn mokkan_typed_value_accessors_yield_typed_payloads() {
+    use std::str::FromStr;
+
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "import mokkan.net\n",
+                "\n",
+                "schema NetCfg:\n",
+                "    subnet: cidr\n",
+                "    addr: inet\n",
+                "    mac: macaddr\n",
+                "    mac8: macaddr8\n",
+                "    fam: IpFamily\n",
+                "\n",
+                "cfg = NetCfg {\n",
+                "    subnet = \"10.0.0.0/24\"\n",
+                "    addr = \"10.0.0.10/24\"\n",
+                "    mac = \"02:00:00:aa:bb:cc\"\n",
+                "    mac8 = \"02:00:00:00:aa:bb:cc:dd\"\n",
+                "    fam = net.V6\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+
+    let subnet = cfg.dict_get_value("subnet").unwrap();
+    assert!(subnet.is_cidr());
+    assert_eq!(
+        subnet.as_cidr(),
+        cidr::IpCidr::from_str("10.0.0.0/24").unwrap()
+    );
+
+    let addr = cfg.dict_get_value("addr").unwrap();
+    assert!(addr.is_inet());
+    assert_eq!(
+        addr.as_inet(),
+        cidr::IpInet::from_str("10.0.0.10/24").unwrap()
+    );
+
+    let mac = cfg.dict_get_value("mac").unwrap();
+    assert!(mac.is_macaddr());
+    assert_eq!(
+        mac.as_macaddr(),
+        macaddr::MacAddr6::from_str("02:00:00:aa:bb:cc").unwrap()
+    );
+
+    let mac8 = cfg.dict_get_value("mac8").unwrap();
+    assert!(mac8.is_macaddr8());
+    assert_eq!(
+        mac8.as_macaddr8(),
+        macaddr::MacAddr8::from_str("02:00:00:00:aa:bb:cc:dd").unwrap()
+    );
+
+    let fam = cfg.dict_get_value("fam").unwrap();
+    assert!(fam.is_ip_family());
+    assert_eq!(fam.as_ip_family(), kcl_runtime::IpFamily::V6);
+}

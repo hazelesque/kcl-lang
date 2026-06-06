@@ -59,6 +59,49 @@ mod _kcl_codegen_helpers {
         }
     }
 
+    // F1.6: mokkan native typed converters. Schema-validation-time
+    // string coercion (F1.3) already turned any operator-written
+    // string literal into a typed value before it reaches us, so
+    // these accept only the corresponding Value variant. If a
+    // consumer fabricates a wrong-shape ValueRef by hand they get
+    // the same `expected X, got Y` error as the primitive
+    // converters above.
+    pub fn from_cidr(v: &ValueRef) -> Result<cidr::IpCidr, String> {
+        if v.is_cidr() {
+            Ok(v.as_cidr())
+        } else {
+            Err(format!("expected cidr, got {}", v.type_str()))
+        }
+    }
+    pub fn from_inet(v: &ValueRef) -> Result<cidr::IpInet, String> {
+        if v.is_inet() {
+            Ok(v.as_inet())
+        } else {
+            Err(format!("expected inet, got {}", v.type_str()))
+        }
+    }
+    pub fn from_macaddr(v: &ValueRef) -> Result<macaddr::MacAddr6, String> {
+        if v.is_macaddr() {
+            Ok(v.as_macaddr())
+        } else {
+            Err(format!("expected macaddr, got {}", v.type_str()))
+        }
+    }
+    pub fn from_macaddr8(v: &ValueRef) -> Result<macaddr::MacAddr8, String> {
+        if v.is_macaddr8() {
+            Ok(v.as_macaddr8())
+        } else {
+            Err(format!("expected macaddr8, got {}", v.type_str()))
+        }
+    }
+    pub fn from_ip_family(v: &ValueRef) -> Result<kcl_runtime::IpFamily, String> {
+        if v.is_ip_family() {
+            Ok(v.as_ip_family())
+        } else {
+            Err(format!("expected IpFamily, got {}", v.type_str()))
+        }
+    }
+
     pub fn require<T, F>(
         v: &ValueRef,
         field: &str,
@@ -518,6 +561,11 @@ fn emit_conv_closure(kind: &FieldKind) -> String {
                 "|f: &kcl_runtime::ValueRef| <{name} as TryFrom<&kcl_runtime::ValueRef>>::try_from(f)"
             )
         }
+        FieldKind::Cidr => "_kcl_codegen_helpers::from_cidr".to_string(),
+        FieldKind::Inet => "_kcl_codegen_helpers::from_inet".to_string(),
+        FieldKind::Macaddr => "_kcl_codegen_helpers::from_macaddr".to_string(),
+        FieldKind::Macaddr8 => "_kcl_codegen_helpers::from_macaddr8".to_string(),
+        FieldKind::IpFamily => "_kcl_codegen_helpers::from_ip_family".to_string(),
         FieldKind::Unsupported(label) => {
             format!("compile_error!(\"unsupported field kind: {label}\")")
         }
@@ -649,5 +697,110 @@ mod tests {
         let out = emit_rust_source(&module).expect("emit");
         assert!(out.contains("pub r#type: String,"));
         assert!(out.contains("let r#type = _kcl_codegen_helpers::require(v, \"type\""));
+    }
+
+    /// F1.6 — mokkan typed-inet fields codegen straight through to
+    /// the upstream `cidr` / `macaddr` crate types and our own
+    /// `kcl_runtime::IpFamily` enum. The TryFrom bodies delegate to
+    /// the `_kcl_codegen_helpers::from_<type>` wrappers — same
+    /// shape as `from_int` / `from_str` etc.
+    #[test]
+    fn emit_mokkan_typed_inet_fields() {
+        let module = module_with_schemas(vec![schema_ir_for(
+            "Network",
+            vec![
+                FieldIR {
+                    name: "cidr".into(),
+                    kind: FieldKind::Cidr,
+                    optional: false,
+                    has_default: false,
+                },
+                FieldIR {
+                    name: "gateway".into(),
+                    kind: FieldKind::Inet,
+                    optional: true,
+                    has_default: false,
+                },
+                FieldIR {
+                    name: "mac".into(),
+                    kind: FieldKind::Macaddr,
+                    optional: false,
+                    has_default: false,
+                },
+                FieldIR {
+                    name: "eui64".into(),
+                    kind: FieldKind::Macaddr8,
+                    optional: false,
+                    has_default: false,
+                },
+                FieldIR {
+                    name: "family".into(),
+                    kind: FieldKind::IpFamily,
+                    optional: false,
+                    has_default: false,
+                },
+            ],
+        )]);
+        let out = emit_rust_source(&module).expect("emit");
+        // Struct fields use the typed Rust types.
+        assert!(
+            out.contains("pub cidr: cidr::IpCidr,"),
+            "missing typed cidr field:\n{out}"
+        );
+        assert!(
+            out.contains("pub gateway: Option<cidr::IpInet>,"),
+            "missing typed inet field:\n{out}"
+        );
+        assert!(
+            out.contains("pub mac: macaddr::MacAddr6,"),
+            "missing typed macaddr field:\n{out}"
+        );
+        assert!(
+            out.contains("pub eui64: macaddr::MacAddr8,"),
+            "missing typed macaddr8 field:\n{out}"
+        );
+        assert!(
+            out.contains("pub family: kcl_runtime::IpFamily,"),
+            "missing IpFamily field:\n{out}"
+        );
+        // TryFrom bodies use the typed converters.
+        assert!(out.contains("_kcl_codegen_helpers::from_cidr"));
+        assert!(out.contains("_kcl_codegen_helpers::from_inet"));
+        assert!(out.contains("_kcl_codegen_helpers::from_macaddr"));
+        assert!(out.contains("_kcl_codegen_helpers::from_macaddr8"));
+        assert!(out.contains("_kcl_codegen_helpers::from_ip_family"));
+    }
+
+    /// F1.6 — collection shapes (`[cidr]`, `{str:inet}`) round-trip
+    /// the typed inner kind through the same `from_list` /
+    /// `from_dict` machinery the rest of the codegen uses.
+    #[test]
+    fn emit_mokkan_typed_inet_in_collections() {
+        let module = module_with_schemas(vec![schema_ir_for(
+            "Pool",
+            vec![
+                FieldIR {
+                    name: "subnets".into(),
+                    kind: FieldKind::List(Box::new(FieldKind::Cidr)),
+                    optional: false,
+                    has_default: false,
+                },
+                FieldIR {
+                    name: "by_name".into(),
+                    kind: FieldKind::Dict(Box::new(FieldKind::Str), Box::new(FieldKind::Inet)),
+                    optional: false,
+                    has_default: false,
+                },
+            ],
+        )]);
+        let out = emit_rust_source(&module).expect("emit");
+        assert!(
+            out.contains("pub subnets: Vec<cidr::IpCidr>,"),
+            "list of cidr:\n{out}"
+        );
+        assert!(
+            out.contains("pub by_name: std::collections::HashMap<String, cidr::IpInet>,"),
+            "dict of inet:\n{out}"
+        );
     }
 }

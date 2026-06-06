@@ -165,6 +165,21 @@ pub enum FieldKind {
     /// [`ModuleIR::enums`]) by its generated Rust name. The variants
     /// themselves are stored on the [`EnumIR`].
     StrEnum(String),
+    /// F1.6: mokkan native typed inet — emits as `cidr::IpCidr`.
+    /// Consumer crate must depend on `cidr = "0.3"` (same version
+    /// as the fork) so the round-trip type matches.
+    Cidr,
+    /// F1.6: mokkan native typed inet — emits as `cidr::IpInet`.
+    Inet,
+    /// F1.6: mokkan native MAC — emits as `macaddr::MacAddr6`.
+    Macaddr,
+    /// F1.6: mokkan native MAC-8 — emits as `macaddr::MacAddr8`.
+    Macaddr8,
+    /// F1.6: mokkan native IP family enum — emits as
+    /// `kcl_runtime::IpFamily`. (Stable location across the
+    /// post-F2 `kcl_*` → `mokkan_*` crate rename; regenerated code
+    /// picks up the new path at re-codegen time.)
+    IpFamily,
     /// A kind the Phase 4 MVP doesn't yet handle. Carries a
     /// descriptive label so codegen errors point at the actual
     /// unsupported shape rather than `Unknown`.
@@ -188,6 +203,11 @@ impl FieldKind {
             ),
             FieldKind::Schema(name) => name.clone(),
             FieldKind::StrEnum(name) => name.clone(),
+            FieldKind::Cidr => "cidr::IpCidr".to_string(),
+            FieldKind::Inet => "cidr::IpInet".to_string(),
+            FieldKind::Macaddr => "macaddr::MacAddr6".to_string(),
+            FieldKind::Macaddr8 => "macaddr::MacAddr8".to_string(),
+            FieldKind::IpFamily => "kcl_runtime::IpFamily".to_string(),
             FieldKind::Unsupported(label) => format!("/* UNSUPPORTED: {label} */ ()"),
         }
     }
@@ -786,28 +806,17 @@ fn field_kind_for(
         TypeKind::Void => FieldKind::Unsupported("Void-typed field".to_string()),
         TypeKind::Module(_) => FieldKind::Unsupported("module-typed field".to_string()),
         TypeKind::Named(name) => FieldKind::Unsupported(format!("Named type alias `{name}`")),
-        // F1.2: mokkan native types — sema-level registered but
-        // codegen mapping (to `cidr::IpCidr` / `cidr::IpInet` /
-        // `macaddr::MacAddr6` / `macaddr::MacAddr8` / `IpFamily`)
-        // lands in F1.6. Marked Unsupported here so any consumer
-        // attempting codegen now gets a clear error rather than
-        // silently emitting a wrong type. F1.6 replaces each arm
-        // with the typed FieldKind.
-        TypeKind::Cidr => FieldKind::Unsupported(
-            "cidr-typed field (typed-inet codegen lands in F1.6)".to_string(),
-        ),
-        TypeKind::Inet => FieldKind::Unsupported(
-            "inet-typed field (typed-inet codegen lands in F1.6)".to_string(),
-        ),
-        TypeKind::Macaddr => FieldKind::Unsupported(
-            "macaddr-typed field (typed-mac codegen lands in F1.6)".to_string(),
-        ),
-        TypeKind::Macaddr8 => FieldKind::Unsupported(
-            "macaddr8-typed field (typed-mac codegen lands in F1.6)".to_string(),
-        ),
-        TypeKind::IpFamily => {
-            FieldKind::Unsupported("IpFamily-typed field (codegen lands in F1.6)".to_string())
-        }
+        // F1.6: mokkan native types codegen straight through to the
+        // upstream `cidr` / `macaddr` crate types and our own
+        // `kcl_runtime::IpFamily` enum. Consumer crates must depend
+        // on `cidr = "0.3"` / `macaddr = "1.0"` (workspace-pinned per
+        // D7) so the round-trip type matches the runtime accessor's
+        // return type.
+        TypeKind::Cidr => FieldKind::Cidr,
+        TypeKind::Inet => FieldKind::Inet,
+        TypeKind::Macaddr => FieldKind::Macaddr,
+        TypeKind::Macaddr8 => FieldKind::Macaddr8,
+        TypeKind::IpFamily => FieldKind::IpFamily,
     }
 }
 

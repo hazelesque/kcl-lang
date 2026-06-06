@@ -50,6 +50,38 @@ impl ValueRef {
         self.kind() == Kind::Schema
     }
 
+    // F1.6: mokkan native variant predicates. `kind()` lumps
+    // cidr/inet under `Kind::Inet` and macaddr/macaddr8 under
+    // `Kind::MacAddr` for C-ABI dispatch; the codegen-emitted
+    // `from_cidr` / `from_inet` / `from_macaddr` / `from_macaddr8`
+    // helpers need a finer distinction, so these matches go through
+    // the Value variant directly.
+
+    #[inline]
+    pub fn is_cidr(&self) -> bool {
+        matches!(&*self.rc.borrow(), Value::cidr_value(_))
+    }
+
+    #[inline]
+    pub fn is_inet(&self) -> bool {
+        matches!(&*self.rc.borrow(), Value::inet_value(_))
+    }
+
+    #[inline]
+    pub fn is_macaddr(&self) -> bool {
+        matches!(&*self.rc.borrow(), Value::macaddr_value(_))
+    }
+
+    #[inline]
+    pub fn is_macaddr8(&self) -> bool {
+        matches!(&*self.rc.borrow(), Value::macaddr8_value(_))
+    }
+
+    #[inline]
+    pub fn is_ip_family(&self) -> bool {
+        matches!(&*self.rc.borrow(), Value::ip_family_value(_))
+    }
+
     #[inline]
     pub fn is_number(&self) -> bool {
         matches!(

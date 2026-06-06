@@ -540,6 +540,52 @@ mod tests {
         );
     }
 
+    /// F1.6 — end-to-end: a KCL schema with all five mokkan native
+    /// types round-trips through parser + sema + IR + emitter,
+    /// producing typed Rust fields. Asserts both the struct shape
+    /// (typed Rust types, not the F1.2 Unsupported sentinel) and
+    /// the TryFrom body wiring (the right `from_<type>` helper).
+    #[test]
+    fn analyse_and_generate_mokkan_typed_inet_fields() {
+        let src = concat!(
+            "schema Network:\n",
+            "    cidr: cidr\n",
+            "    gateway?: inet\n",
+            "    mac: macaddr\n",
+            "    eui64: macaddr8\n",
+            "    family: IpFamily\n",
+        );
+        let module = analyse_inline_source(src).expect("analyse");
+        let fields = &module.schemas[0].fields;
+        assert!(matches!(fields[0].kind, FieldKind::Cidr));
+        assert!(matches!(fields[1].kind, FieldKind::Inet));
+        assert!(matches!(fields[2].kind, FieldKind::Macaddr));
+        assert!(matches!(fields[3].kind, FieldKind::Macaddr8));
+        assert!(matches!(fields[4].kind, FieldKind::IpFamily));
+
+        let out = generate_to_string(src).expect("generate");
+        assert!(
+            out.contains("pub cidr: cidr::IpCidr,"),
+            "cidr field shape:\n{out}"
+        );
+        assert!(
+            out.contains("pub gateway: Option<cidr::IpInet>,"),
+            "inet field shape:\n{out}"
+        );
+        assert!(
+            out.contains("pub mac: macaddr::MacAddr6,"),
+            "macaddr field shape:\n{out}"
+        );
+        assert!(
+            out.contains("pub eui64: macaddr::MacAddr8,"),
+            "macaddr8 field shape:\n{out}"
+        );
+        assert!(
+            out.contains("pub family: kcl_runtime::IpFamily,"),
+            "IpFamily field shape:\n{out}"
+        );
+    }
+
     /// Lifted enum name collision: a schema literally named the same
     /// as a discriminator's PascalCase concat would emit two `pub`
     /// items with the same identifier. Codegen detects this and

@@ -54,6 +54,56 @@ impl ValueRef {
         }
     }
 
+    // F1.6: mokkan native typed accessors. Used by the codegen-
+    // emitted `TryFrom<&ValueRef>` impl bodies via the
+    // `_kcl_codegen_helpers::from_cidr` / `from_inet` / etc.
+    // wrappers. Each returns the typed payload by value (all five
+    // types are `Copy`). Panics on shape mismatch — codegen-side
+    // type-checking is supposed to prevent these from being called
+    // on the wrong variant; if a caller defies that, surfacing a
+    // clear panic at the bad accessor site is better than silently
+    // returning a default.
+
+    #[inline]
+    pub fn as_cidr(&self) -> cidr::IpCidr {
+        match &*self.rc.borrow() {
+            Value::cidr_value(v) => *v,
+            _ => panic!("invalid cidr value"),
+        }
+    }
+
+    #[inline]
+    pub fn as_inet(&self) -> cidr::IpInet {
+        match &*self.rc.borrow() {
+            Value::inet_value(v) => *v,
+            _ => panic!("invalid inet value"),
+        }
+    }
+
+    #[inline]
+    pub fn as_macaddr(&self) -> macaddr::MacAddr6 {
+        match &*self.rc.borrow() {
+            Value::macaddr_value(v) => *v,
+            _ => panic!("invalid macaddr value"),
+        }
+    }
+
+    #[inline]
+    pub fn as_macaddr8(&self) -> macaddr::MacAddr8 {
+        match &*self.rc.borrow() {
+            Value::macaddr8_value(v) => *v,
+            _ => panic!("invalid macaddr8 value"),
+        }
+    }
+
+    #[inline]
+    pub fn as_ip_family(&self) -> crate::value::IpFamily {
+        match &*self.rc.borrow() {
+            Value::ip_family_value(v) => *v,
+            _ => panic!("invalid IpFamily value"),
+        }
+    }
+
     #[inline]
     pub fn as_list_ref(&self) -> Ref<'_, ListValue> {
         Ref::map(self.rc.borrow(), |val| match val {

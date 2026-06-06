@@ -29,3 +29,9 @@ kcl-sema.workspace = true
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+# F1.6 integration tests: exercise the as_cidr / as_inet / as_macaddr
+# / as_macaddr8 / as_ip_family ValueRef accessors against typed
+# values directly (the path the codegen-emitted TryFrom bodies
+# follow).
+cidr = "0.3"
+macaddr = "1.0"
