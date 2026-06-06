@@ -48,7 +48,11 @@ fn arg_as_inet(value: &ValueRef, func: &str, arg: &str) -> cidr::IpInet {
         None => value.rc.borrow(),
     };
     match &*view {
-        Value::inet_value(i) => *i,
+        // F2.1: panic on symbolic operands here — F2.2 introduces
+        // per-function symbolic-arm dispatch, which will replace each
+        // panic with the typed propagation rule from the D4 matrix.
+        // Until then, callers operate on resolved values only.
+        Value::inet_value(i) => i.expect_resolved(),
         _ => panic!(
             "{func}() expected inet for argument '{arg}', got {} ({})",
             value.type_str(),
@@ -68,7 +72,7 @@ fn arg_as_cidr(value: &ValueRef, func: &str, arg: &str) -> cidr::IpCidr {
         None => value.rc.borrow(),
     };
     match &*view {
-        Value::cidr_value(c) => *c,
+        Value::cidr_value(c) => c.expect_resolved(),
         _ => panic!(
             "{func}() expected cidr for argument '{arg}', got {} ({})",
             value.type_str(),
@@ -140,7 +144,7 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_netmask(
     let netmask = inet.mask();
     let result =
         cidr::IpInet::new(netmask, inet.network_length()).expect("masklen valid for resolved inet");
-    ValueRef::from(Value::inet_value(result)).into_raw(ctx)
+    ValueRef::from(Value::inet_value(crate::value::InetValue::resolved(result))).into_raw(ctx)
 }
 
 /// PostgreSQL `hostmask(inet) -> inet`: the host mask as an inet
@@ -164,7 +168,7 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_hostmask(
     };
     let result = cidr::IpInet::new(hostmask, inet.network_length())
         .expect("masklen valid for resolved inet");
-    ValueRef::from(Value::inet_value(result)).into_raw(ctx)
+    ValueRef::from(Value::inet_value(crate::value::InetValue::resolved(result))).into_raw(ctx)
 }
 
 /// PostgreSQL `network(inet) -> cidr`: the network portion (host
@@ -181,7 +185,10 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_network(
     let addr = get_call_arg(args, kwargs, 0, Some("addr"))
         .unwrap_or_else(|| panic!("network() missing required argument 'addr'"));
     let inet = arg_as_inet(&addr, "network", "addr");
-    ValueRef::from(Value::cidr_value(inet.network())).into_raw(ctx)
+    ValueRef::from(Value::cidr_value(crate::value::CidrValue::resolved(
+        inet.network(),
+    )))
+    .into_raw(ctx)
 }
 
 /// PostgreSQL `set_masklen(inet, int) -> inet`: set the network
@@ -215,7 +222,7 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_set_masklen(
     }
     let result =
         cidr::IpInet::new(inet.address(), new_mask as u8).expect("masklen bounds checked above");
-    ValueRef::from(Value::inet_value(result)).into_raw(ctx)
+    ValueRef::from(Value::inet_value(crate::value::InetValue::resolved(result))).into_raw(ctx)
 }
 
 /// PostgreSQL `text(inet) -> text`: canonical text form including
@@ -320,7 +327,10 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_inet_merge(
                 if (a_bits & m) == (b_bits & m) {
                     let network = std::net::Ipv4Addr::from(a_bits & m);
                     let merged = cidr::IpCidr::V4(cidr::Ipv4Cidr::new(network, mask).unwrap());
-                    return ValueRef::from(Value::cidr_value(merged)).into_raw(ctx);
+                    return ValueRef::from(Value::cidr_value(crate::value::CidrValue::resolved(
+                        merged,
+                    )))
+                    .into_raw(ctx);
                 }
                 mask -= 1;
             }
@@ -328,7 +338,8 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_inet_merge(
             let merged = cidr::IpCidr::V4(
                 cidr::Ipv4Cidr::new(std::net::Ipv4Addr::new(0, 0, 0, 0), 0).unwrap(),
             );
-            ValueRef::from(Value::cidr_value(merged)).into_raw(ctx)
+            ValueRef::from(Value::cidr_value(crate::value::CidrValue::resolved(merged)))
+                .into_raw(ctx)
         }
         (cidr::IpInet::V6(av), cidr::IpInet::V6(bv)) => {
             let a_bits = u128::from(av.address());
@@ -343,13 +354,17 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_inet_merge(
                 if (a_bits & m) == (b_bits & m) {
                     let network = std::net::Ipv6Addr::from(a_bits & m);
                     let merged = cidr::IpCidr::V6(cidr::Ipv6Cidr::new(network, mask).unwrap());
-                    return ValueRef::from(Value::cidr_value(merged)).into_raw(ctx);
+                    return ValueRef::from(Value::cidr_value(crate::value::CidrValue::resolved(
+                        merged,
+                    )))
+                    .into_raw(ctx);
                 }
                 mask -= 1;
             }
             let merged =
                 cidr::IpCidr::V6(cidr::Ipv6Cidr::new(std::net::Ipv6Addr::UNSPECIFIED, 0).unwrap());
-            ValueRef::from(Value::cidr_value(merged)).into_raw(ctx)
+            ValueRef::from(Value::cidr_value(crate::value::CidrValue::resolved(merged)))
+                .into_raw(ctx)
         }
         _ => panic!("inet_merge() operands must be the same family (v4-v4 or v6-v6)"),
     }
@@ -653,7 +668,7 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_broadcast(
     let result = cidr::IpInet::new(broadcast, inet.network_length())
         .expect("masklen valid for resolved inet");
 
-    ValueRef::from(Value::inet_value(result)).into_raw(ctx)
+    ValueRef::from(Value::inet_value(crate::value::InetValue::resolved(result))).into_raw(ctx)
 }
 
 // F1.7: stringly-typed survivors from upstream KCL's `net` package.

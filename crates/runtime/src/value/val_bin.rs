@@ -42,11 +42,17 @@ impl ValueRef {
             }
             // Mokkan F1.5: inet + int / int + inet (offset arithmetic).
             // Preserves source masklen; overflow panics per inet_add_offset.
+            // F2.1: resolved-only here. F2.2 adds the symbolic arm
+            // (Symbolic(Expr) + int → Symbolic(AddOffset(...))).
             (Value::inet_value(a), Value::int_value(b)) => {
-                Self::from(Value::inet_value(crate::value::inet_add_offset(*a, *b)))
+                Self::from(Value::inet_value(crate::value::InetValue::resolved(
+                    crate::value::inet_add_offset(a.expect_resolved(), *b),
+                )))
             }
             (Value::int_value(a), Value::inet_value(b)) => {
-                Self::from(Value::inet_value(crate::value::inet_add_offset(*b, *a)))
+                Self::from(Value::inet_value(crate::value::InetValue::resolved(
+                    crate::value::inet_add_offset(b.expect_resolved(), *a),
+                )))
             }
             (Value::list_value(a), _) => {
                 if x.is_list() {
@@ -103,15 +109,19 @@ impl ValueRef {
             // Mokkan F1.5: inet - int (offset arithmetic, preserves
             // masklen); inet - inet (signed distance, panics on v6
             // overflow). Same-family only — cross-family panics.
+            // F2.1: resolved-only here; F2.2 adds symbolic arms per D4.
             (Value::inet_value(a), Value::int_value(b)) => {
                 let neg = b
                     .checked_neg()
                     .unwrap_or_else(|| panic!("inet - int: cannot negate {b} (i64::MIN overflow)"));
-                Self::from(Value::inet_value(crate::value::inet_add_offset(*a, neg)))
+                Self::from(Value::inet_value(crate::value::InetValue::resolved(
+                    crate::value::inet_add_offset(a.expect_resolved(), neg),
+                )))
             }
-            (Value::inet_value(a), Value::inet_value(b)) => {
-                Self::int(crate::value::inet_distance(*a, *b))
-            }
+            (Value::inet_value(a), Value::inet_value(b)) => Self::int(crate::value::inet_distance(
+                a.expect_resolved(),
+                b.expect_resolved(),
+            )),
             _ => panic_unsupported_bin_op!("-", self.type_str(), x.type_str()),
         }
     }

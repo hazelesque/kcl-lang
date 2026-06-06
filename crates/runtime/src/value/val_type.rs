@@ -84,12 +84,16 @@ pub fn try_coerce_mokkan_inet(value: &ValueRef, tpe: &str) -> Option<ValueRef> {
         _ => return None,
     };
     match tpe {
+        // F2.1: coerced values land in the Resolved arm of the dual-
+        // state wrapper. String-coercion at schema-validation time is
+        // an eager path by construction — symbolic values come from
+        // builtins (F2.5) not from string literals.
         MOKKAN_TYPE_CIDR => cidr::IpCidr::from_str(&s)
             .ok()
-            .map(|c| ValueRef::from(Value::cidr_value(c))),
+            .map(|c| ValueRef::from(Value::cidr_value(crate::value::CidrValue::resolved(c)))),
         MOKKAN_TYPE_INET => cidr::IpInet::from_str(&s)
             .ok()
-            .map(|i| ValueRef::from(Value::inet_value(i))),
+            .map(|i| ValueRef::from(Value::inet_value(crate::value::InetValue::resolved(i)))),
         MOKKAN_TYPE_MACADDR => macaddr::MacAddr6::from_str(&s)
             .ok()
             .map(|m| ValueRef::from(Value::macaddr_value(m))),

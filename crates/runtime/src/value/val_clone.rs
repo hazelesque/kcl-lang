@@ -62,13 +62,16 @@ impl ValueRef {
                 dict.set_potential_schema_type(&v.potential_schema.clone().unwrap_or_default());
                 dict
             }
-            // F1.1: mokkan native types are Copy-like; deep_copy is
-            // just a constructor with the same payload.
+            // F1.1: mokkan native types are Copy-like for the bare
+            // payloads (macaddr / IpFamily); F2.1 wraps cidr / inet in
+            // dual-state newtypes that derive Clone but not Copy
+            // (Symbolic carries a recursive Expr tree), so deep_copy
+            // clones the boxed wrapper explicitly.
             Value::cidr_value(v) => ValueRef {
-                rc: Rc::new(RefCell::new(Value::cidr_value(*v))),
+                rc: Rc::new(RefCell::new(Value::cidr_value(v.clone()))),
             },
             Value::inet_value(v) => ValueRef {
-                rc: Rc::new(RefCell::new(Value::inet_value(*v))),
+                rc: Rc::new(RefCell::new(Value::inet_value(v.clone()))),
             },
             Value::macaddr_value(v) => ValueRef {
                 rc: Rc::new(RefCell::new(Value::macaddr_value(*v))),

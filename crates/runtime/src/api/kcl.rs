@@ -226,14 +226,18 @@ pub enum Value {
     func_value(Box<FuncValue>),
     unit_value(f64, i64, String), // (Real value, raw value, unit string)
 
-    // Mokkan native network types (F1.1). Resolved-only at F1; F2's
-    // dual-state refactor will box these into wrapper types carrying
-    // either the resolved value or a symbolic IR tree. Direct
-    // payloads here because they're small enough (24-32 bytes
-    // each) to inline without growing the enum's stack footprint
-    // beyond what the existing schema/func variants already imply.
-    cidr_value(cidr::IpCidr),
-    inet_value(cidr::IpInet),
+    // Mokkan native network types. F1 carried bare `IpCidr` / `IpInet`
+    // payloads here; F2.1 boxed them into wrapper newtypes carrying
+    // either the F1-shaped resolved value OR a symbolic IR tree
+    // (`Expr`) for deferred resolution. Box keeps Value's stack
+    // footprint manageable — Expr is recursive and would otherwise
+    // dominate every variant's size.
+    //
+    // macaddr / macaddr8 / IpFamily stay bare — these have no F2
+    // symbolic story (D6 / F2 scope), so wrapping them would be
+    // ceremony without benefit.
+    cidr_value(Box<crate::value::CidrValue>),
+    inet_value(Box<crate::value::InetValue>),
     macaddr_value(macaddr::MacAddr6),
     macaddr8_value(macaddr::MacAddr8),
     ip_family_value(crate::value::IpFamily),

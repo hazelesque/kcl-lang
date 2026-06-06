@@ -64,18 +64,26 @@ impl ValueRef {
     // clear panic at the bad accessor site is better than silently
     // returning a default.
 
+    /// Extract a resolved `IpCidr`. Panics if the value is symbolic
+    /// (F2.2 sites that need to traffic in either state should match
+    /// on the `CidrValue.inner` instead — this accessor is the
+    /// resolved-only F1 shape for codegen-emitted TryFrom bodies and
+    /// the eager-algebra fallthrough).
     #[inline]
     pub fn as_cidr(&self) -> cidr::IpCidr {
         match &*self.rc.borrow() {
-            Value::cidr_value(v) => *v,
+            Value::cidr_value(v) => v.expect_resolved(),
             _ => panic!("invalid cidr value"),
         }
     }
 
+    /// Extract a resolved `IpInet`. Same shape and caveats as
+    /// `as_cidr` — symbolic panics here, traffic in `InetValue.inner`
+    /// directly if you need to handle both states.
     #[inline]
     pub fn as_inet(&self) -> cidr::IpInet {
         match &*self.rc.borrow() {
-            Value::inet_value(v) => *v,
+            Value::inet_value(v) => v.expect_resolved(),
             _ => panic!("invalid inet value"),
         }
     }
