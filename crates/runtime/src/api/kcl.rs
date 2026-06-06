@@ -461,8 +461,8 @@ pub enum Kind {
     // F1.1: mokkan native network types. Coarser than the Value
     // variants — runtime dispatch via C ABI only needs the
     // family-level distinction.
-    Inet = 19,     // covers both cidr_value and inet_value
-    MacAddr = 20,  // covers macaddr_value and macaddr8_value
+    Inet = 19,    // covers both cidr_value and inet_value
+    MacAddr = 20, // covers macaddr_value and macaddr8_value
     IpFamily = 21,
 }
 

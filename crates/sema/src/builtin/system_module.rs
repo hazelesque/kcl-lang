@@ -2571,22 +2571,8 @@ register_mokkan_net_member! {
 }
 
 pub const STANDARD_SYSTEM_MODULES: &[&str] = &[
-    COLLECTION,
-    NET,
-    MANIFESTS,
-    MATH,
-    DATETIME,
-    REGEX,
-    YAML,
-    JSON,
-    CRYPTO,
-    BASE64,
-    UNITS,
-    FILE,
-    TEMPLATE,
-    RUNTIME,
-    BASE32,
-    // F1.4: mokkan native packages.
+    COLLECTION, NET, MANIFESTS, MATH, DATETIME, REGEX, YAML, JSON, CRYPTO, BASE64, UNITS, FILE,
+    TEMPLATE, RUNTIME, BASE32, // F1.4: mokkan native packages.
     MOKKAN_NET,
 ];
 

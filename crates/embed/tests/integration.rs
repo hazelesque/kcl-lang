@@ -15,7 +15,10 @@ use kcl_embed::{Embedded, EvaluateArgs, EvaluationError, render_diagnostics};
 /// Mirrors `kcl_embed::render_diagnostics` for the Resolve/Evaluate
 /// variants and falls back to the plain Display for Internal (which
 /// is rare and already prints a useful message).
-fn evaluate_or_panic(ready: &kcl_embed::EmbeddedReady, args: EvaluateArgs) -> kcl_embed::EvaluateOutcome {
+fn evaluate_or_panic(
+    ready: &kcl_embed::EmbeddedReady,
+    args: EvaluateArgs,
+) -> kcl_embed::EvaluateOutcome {
     match ready.evaluate(args) {
         Ok(outcome) => outcome,
         Err(EvaluationError::Resolve(diags)) | Err(EvaluationError::Evaluate(diags)) => {
@@ -737,7 +740,11 @@ fn mokkan_string_coercion_typed_inet_at_validation_time() {
 
     let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
     let c = cfg.dict_get_value("cidr_field").unwrap();
-    assert_eq!(c.type_str(), "cidr", "cidr_field should now carry a typed cidr_value");
+    assert_eq!(
+        c.type_str(),
+        "cidr",
+        "cidr_field should now carry a typed cidr_value"
+    );
     let i = cfg.dict_get_value("inet_field").unwrap();
     assert_eq!(i.type_str(), "inet");
     let m = cfg.dict_get_value("mac_field").unwrap();
@@ -846,20 +853,14 @@ fn mokkan_net_algebra_pg_documented_behaviour() {
         format!("{}", v.dict_get_value("network_").unwrap()),
         "10.0.5.0/24"
     );
-    assert_eq!(
-        v.dict_get_value("text_").unwrap().as_str(),
-        "10.0.5.1/24"
-    );
+    assert_eq!(v.dict_get_value("text_").unwrap().as_str(), "10.0.5.1/24");
     assert_eq!(format!("{}", v.dict_get_value("family_").unwrap()), "V4");
     assert_eq!(
         v.dict_get_value("abbrev_24").unwrap().as_str(),
         "10.0.5.1/24"
     );
     // /32 suppresses to host form (no masklen).
-    assert_eq!(
-        v.dict_get_value("abbrev_32").unwrap().as_str(),
-        "10.0.5.1"
-    );
+    assert_eq!(v.dict_get_value("abbrev_32").unwrap().as_str(), "10.0.5.1");
     assert_eq!(
         format!("{}", v.dict_get_value("set_mask").unwrap()),
         "10.0.5.1/16"
@@ -947,4 +948,192 @@ fn mokkan_string_coercion_lenient_inet_accepts_host_bits_set() {
     let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
     let i = cfg.dict_get_value("inet_field").unwrap();
     assert_eq!(i.type_str(), "inet");
+}
+
+/// F1.5 — `inet + int` / `int + inet` / `inet - int` (offset
+/// arithmetic). Masklen preserved from the source inet; the result
+/// is a typed `inet_value`.
+#[test]
+fn mokkan_inet_offset_arithmetic_preserves_masklen() {
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "schema NetCfg:\n",
+                "    base: inet\n",
+                "    plus5: inet\n",
+                "    plus5_swapped: inet\n",
+                "    minus3: inet\n",
+                "\n",
+                "base: inet = \"10.0.0.10/24\"\n",
+                "\n",
+                "cfg = NetCfg {\n",
+                "    base = base\n",
+                "    plus5 = base + 5\n",
+                "    plus5_swapped = 5 + base\n",
+                "    minus3 = base - 3\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+    assert_eq!(
+        format!("{}", cfg.dict_get_value("base").unwrap()),
+        "10.0.0.10/24"
+    );
+    assert_eq!(
+        format!("{}", cfg.dict_get_value("plus5").unwrap()),
+        "10.0.0.15/24"
+    );
+    assert_eq!(
+        format!("{}", cfg.dict_get_value("plus5_swapped").unwrap()),
+        "10.0.0.15/24"
+    );
+    assert_eq!(
+        format!("{}", cfg.dict_get_value("minus3").unwrap()),
+        "10.0.0.7/24"
+    );
+}
+
+/// F1.5 — `inet - inet` (signed distance). v4 - v4 always fits i64;
+/// result is a typed int.
+#[test]
+fn mokkan_inet_subtract_inet_v4_signed_distance() {
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "schema NetCfg:\n",
+                "    diff_pos: int\n",
+                "    diff_neg: int\n",
+                "    diff_zero: int\n",
+                "\n",
+                "a: inet = \"10.0.0.100/24\"\n",
+                "b: inet = \"10.0.0.10/24\"\n",
+                "\n",
+                "cfg = NetCfg {\n",
+                "    diff_pos = a - b\n",
+                "    diff_neg = b - a\n",
+                "    diff_zero = a - a\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+    assert_eq!(cfg.dict_get_value("diff_pos").unwrap().as_int(), 90);
+    assert_eq!(cfg.dict_get_value("diff_neg").unwrap().as_int(), -90);
+    assert_eq!(cfg.dict_get_value("diff_zero").unwrap().as_int(), 0);
+}
+
+/// F1.5 — equality on `inet`, `cidr`, and `IpFamily`. The cidr
+/// crate's derived PartialEq handles same-value comparisons;
+/// distinct values compare unequal.
+#[test]
+fn mokkan_inet_cidr_ipfamily_equality() {
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "import mokkan.net\n",
+                "\n",
+                "schema NetCfg:\n",
+                "    inet_eq: bool\n",
+                "    inet_ne: bool\n",
+                "    cidr_eq: bool\n",
+                "    cidr_ne: bool\n",
+                "    fam_eq: bool\n",
+                "    fam_ne: bool\n",
+                "    fam_query: bool\n",
+                "\n",
+                "a: inet = \"10.0.0.1/24\"\n",
+                "b: inet = \"10.0.0.1/24\"\n",
+                "c: inet = \"10.0.0.2/24\"\n",
+                "x: cidr = \"10.0.0.0/24\"\n",
+                "y: cidr = \"10.0.0.0/24\"\n",
+                "z: cidr = \"10.0.1.0/24\"\n",
+                "\n",
+                "cfg = NetCfg {\n",
+                "    inet_eq = a == b\n",
+                "    inet_ne = a != c\n",
+                "    cidr_eq = x == y\n",
+                "    cidr_ne = x != z\n",
+                "    fam_eq = net.V4 == net.V4\n",
+                "    fam_ne = net.V4 != net.V6\n",
+                "    fam_query = net.family(a) == net.V4\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+    for k in [
+        "inet_eq",
+        "inet_ne",
+        "cidr_eq",
+        "cidr_ne",
+        "fam_eq",
+        "fam_ne",
+        "fam_query",
+    ] {
+        assert!(
+            cfg.dict_get_value(k).unwrap().as_bool(),
+            "expected {k} to be true"
+        );
+    }
+}
+
+/// F1.5 — ordering on `inet` and `cidr`. cidr crate derives Ord;
+/// we expose `< <= > >=` directly. Equal addresses with equal mask
+/// compare equal in `<=` / `>=`.
+#[test]
+fn mokkan_inet_cidr_ordering() {
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "schema NetCfg:\n",
+                "    lt: bool\n",
+                "    le_eq: bool\n",
+                "    gt: bool\n",
+                "    ge_eq: bool\n",
+                "    cidr_lt: bool\n",
+                "\n",
+                "a: inet = \"10.0.0.10/24\"\n",
+                "b: inet = \"10.0.0.20/24\"\n",
+                "c: inet = \"10.0.0.10/24\"\n",
+                "x: cidr = \"10.0.0.0/24\"\n",
+                "y: cidr = \"10.0.1.0/24\"\n",
+                "\n",
+                "cfg = NetCfg {\n",
+                "    lt = a < b\n",
+                "    le_eq = a <= c\n",
+                "    gt = b > a\n",
+                "    ge_eq = a >= c\n",
+                "    cidr_lt = x < y\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+    for k in ["lt", "le_eq", "gt", "ge_eq", "cidr_lt"] {
+        assert!(
+            cfg.dict_get_value(k).unwrap().as_bool(),
+            "expected {k} to be true"
+        );
+    }
 }

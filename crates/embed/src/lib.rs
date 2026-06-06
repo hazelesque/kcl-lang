@@ -88,9 +88,7 @@ pub fn render_diagnostics(diags: &[Diagnostic]) -> String {
             // shape callers were getting before, plus a marker that
             // the pretty-render path failed so the operator knows
             // what to look at.
-            format!(
-                "[kcl-embed: render_diagnostics fell through to Debug — {e}]\n{diags:#?}"
-            )
+            format!("[kcl-embed: render_diagnostics fell through to Debug — {e}]\n{diags:#?}")
         }
     }
 }

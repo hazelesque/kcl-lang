@@ -90,11 +90,31 @@ impl<'ctx> Resolver<'ctx> {
                         true,
                         Type::list_ref(sup(&[t1.list_item_ty(), t2.list_item_ty()])),
                     )
+                } else if (t1.is_inet() && t2.is_int()) || (t1.is_int() && t2.is_inet()) {
+                    // Mokkan F1.5: inet + int / int + inet (offset
+                    // arithmetic). Result preserves the source
+                    // masklen at runtime.
+                    (true, Arc::new(Type::INET))
                 } else {
                     (false, self.any_ty())
                 }
             }
-            ast::BinOp::Sub | ast::BinOp::Pow => {
+            ast::BinOp::Sub => {
+                if t1.is_number() && t2.is_number() {
+                    (true, number_binary(&t1, &t2))
+                } else if t1.is_inet() && t2.is_int() {
+                    // Mokkan F1.5: inet - int (offset arithmetic).
+                    (true, Arc::new(Type::INET))
+                } else if t1.is_inet() && t2.is_inet() {
+                    // Mokkan F1.5: inet - inet (signed distance).
+                    // v4-v4 always fits i64; v6-v6 panics at runtime
+                    // on overflow.
+                    (true, self.int_ty())
+                } else {
+                    (false, self.any_ty())
+                }
+            }
+            ast::BinOp::Pow => {
                 if t1.is_number() && t2.is_number() {
                     (true, number_binary(&t1, &t2))
                 } else {
@@ -304,6 +324,27 @@ impl<'ctx> Resolver<'ctx> {
             return self.bool_ty();
         }
         if matches!(op, ast::CmpOp::Eq) && t1.is_dict_or_schema() && t2.is_dict_or_schema() {
+            return self.bool_ty();
+        }
+        // Mokkan F1.5: ordering and equality on inet / cidr (full
+        // comparison set per D10). Cross-family compares produce
+        // bool at the type level; runtime semantics defer to the
+        // cidr crate's derived Ord (V4 < V6 across families). The
+        // `<<` / `>>` / `<<=` / `>>=` / `&&` PG operators are
+        // deliberately skipped (D10 — function-form only for
+        // containment / overlap predicates).
+        if (t1.is_inet() && t2.is_inet()) || (t1.is_cidr() && t2.is_cidr()) {
+            return self.bool_ty();
+        }
+        // Mokkan F1.5: equality on IpFamily / macaddr / macaddr8.
+        // No ordering wired — these are categorical values; the only
+        // useful comparison is identity (e.g.,
+        // `family(addr) == V4`).
+        if matches!(op, ast::CmpOp::Eq | ast::CmpOp::NotEq)
+            && ((t1.is_ip_family() && t2.is_ip_family())
+                || (t1.is_macaddr() && t2.is_macaddr())
+                || (t1.is_macaddr8() && t2.is_macaddr8()))
+        {
             return self.bool_ty();
         }
         if matches!(op, ast::CmpOp::In | ast::CmpOp::NotIn) && t2.is_iterable() {

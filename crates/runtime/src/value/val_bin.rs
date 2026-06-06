@@ -40,6 +40,14 @@ impl ValueRef {
             (Value::str_value(a), Value::str_value(b)) => {
                 Self::str(format!("{}{}", *a, *b).as_ref())
             }
+            // Mokkan F1.5: inet + int / int + inet (offset arithmetic).
+            // Preserves source masklen; overflow panics per inet_add_offset.
+            (Value::inet_value(a), Value::int_value(b)) => {
+                Self::from(Value::inet_value(crate::value::inet_add_offset(*a, *b)))
+            }
+            (Value::int_value(a), Value::inet_value(b)) => {
+                Self::from(Value::inet_value(crate::value::inet_add_offset(*b, *a)))
+            }
             (Value::list_value(a), _) => {
                 if x.is_list() {
                     let mut list = a.clone();
@@ -91,6 +99,18 @@ impl ValueRef {
                     panic_f32_overflow!(ctx, *a - *b as f64);
                 }
                 Self::float(*a - *b as f64)
+            }
+            // Mokkan F1.5: inet - int (offset arithmetic, preserves
+            // masklen); inet - inet (signed distance, panics on v6
+            // overflow). Same-family only — cross-family panics.
+            (Value::inet_value(a), Value::int_value(b)) => {
+                let neg = b
+                    .checked_neg()
+                    .unwrap_or_else(|| panic!("inet - int: cannot negate {b} (i64::MIN overflow)"));
+                Self::from(Value::inet_value(crate::value::inet_add_offset(*a, neg)))
+            }
+            (Value::inet_value(a), Value::inet_value(b)) => {
+                Self::int(crate::value::inet_distance(*a, *b))
             }
             _ => panic_unsupported_bin_op!("-", self.type_str(), x.type_str()),
         }

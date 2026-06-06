@@ -64,3 +64,72 @@ impl std::fmt::Display for IpFamily {
         }
     }
 }
+
+/// `inet + int` / `inet - int` (offset arithmetic). Adds `offset` to
+/// the address portion of `inet`, preserving the masklen. Overflow
+/// (v4 going outside `0..=u32::MAX`, or v6 outside `0..=u128::MAX`)
+/// panics with a clear message. PostgreSQL's silent wrap is not
+/// inherited.
+pub fn inet_add_offset(inet: cidr::IpInet, offset: i64) -> cidr::IpInet {
+    let masklen = inet.network_length();
+    match inet {
+        cidr::IpInet::V4(v4) => {
+            let bits = i64::from(u32::from(v4.address()));
+            let new = bits.checked_add(offset).unwrap_or_else(|| {
+                panic!("inet arithmetic overflow: v4 address {bits} + {offset} overflows i64")
+            });
+            if !(0..=i64::from(u32::MAX)).contains(&new) {
+                panic!(
+                    "inet arithmetic overflow: v4 address {bits} + {offset} = {new} out of range"
+                );
+            }
+            let addr = std::net::Ipv4Addr::from(new as u32);
+            cidr::IpInet::new(std::net::IpAddr::V4(addr), masklen)
+                .expect("masklen preserved from source inet")
+        }
+        cidr::IpInet::V6(v6) => {
+            let bits = u128::from(v6.address());
+            let new = if offset >= 0 {
+                bits.checked_add(offset as u128)
+            } else {
+                bits.checked_sub(offset.unsigned_abs() as u128)
+            }
+            .unwrap_or_else(|| {
+                panic!("inet arithmetic overflow: v6 address {bits} + {offset} out of range")
+            });
+            let addr = std::net::Ipv6Addr::from(new);
+            cidr::IpInet::new(std::net::IpAddr::V6(addr), masklen)
+                .expect("masklen preserved from source inet")
+        }
+    }
+}
+
+/// `inet - inet` (signed distance). v4-v4 always fits `i64` (max
+/// span `u32::MAX`). v6-v6 may overflow — distance up to `2^128`;
+/// any absolute value above `i64::MAX` panics with a clear
+/// "v6 distance exceeds i64" message. Cross-family panics.
+pub fn inet_distance(a: cidr::IpInet, b: cidr::IpInet) -> i64 {
+    match (a, b) {
+        (cidr::IpInet::V4(av), cidr::IpInet::V4(bv)) => {
+            i64::from(u32::from(av.address())) - i64::from(u32::from(bv.address()))
+        }
+        (cidr::IpInet::V6(av), cidr::IpInet::V6(bv)) => {
+            let a_bits = u128::from(av.address());
+            let b_bits = u128::from(bv.address());
+            if a_bits >= b_bits {
+                let d = a_bits - b_bits;
+                if d > i64::MAX as u128 {
+                    panic!("inet arithmetic overflow: v6 distance {d} exceeds i64");
+                }
+                d as i64
+            } else {
+                let d = b_bits - a_bits;
+                if d > i64::MAX as u128 {
+                    panic!("inet arithmetic overflow: v6 distance {d} exceeds i64");
+                }
+                -(d as i64)
+            }
+        }
+        _ => panic!("inet - inet: operands must be the same family (v4-v4 or v6-v6)"),
+    }
+}

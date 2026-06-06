@@ -138,8 +138,8 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_netmask(
         .unwrap_or_else(|| panic!("netmask() missing required argument 'addr'"));
     let inet = arg_as_inet(&addr, "netmask", "addr");
     let netmask = inet.mask();
-    let result = cidr::IpInet::new(netmask, inet.network_length())
-        .expect("masklen valid for resolved inet");
+    let result =
+        cidr::IpInet::new(netmask, inet.network_length()).expect("masklen valid for resolved inet");
     ValueRef::from(Value::inet_value(result)).into_raw(ctx)
 }
 
@@ -213,8 +213,8 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_set_masklen(
             if max_mask == 32 { "4" } else { "6" }
         );
     }
-    let result = cidr::IpInet::new(inet.address(), new_mask as u8)
-        .expect("masklen bounds checked above");
+    let result =
+        cidr::IpInet::new(inet.address(), new_mask as u8).expect("masklen bounds checked above");
     ValueRef::from(Value::inet_value(result)).into_raw(ctx)
 }
 
@@ -312,7 +312,11 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_inet_merge(
             let b_bits = u32::from(bv.address());
             let mut mask = av.network_length().min(bv.network_length());
             while mask > 0 {
-                let m: u32 = if mask == 0 { 0 } else { !((1u32 << (32 - mask)) - 1) };
+                let m: u32 = if mask == 0 {
+                    0
+                } else {
+                    !((1u32 << (32 - mask)) - 1)
+                };
                 if (a_bits & m) == (b_bits & m) {
                     let network = std::net::Ipv4Addr::from(a_bits & m);
                     let merged = cidr::IpCidr::V4(cidr::Ipv4Cidr::new(network, mask).unwrap());
@@ -331,7 +335,11 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_inet_merge(
             let b_bits = u128::from(bv.address());
             let mut mask = av.network_length().min(bv.network_length());
             while mask > 0 {
-                let m: u128 = if mask == 0 { 0 } else { !((1u128 << (128 - mask)) - 1) };
+                let m: u128 = if mask == 0 {
+                    0
+                } else {
+                    !((1u128 << (128 - mask)) - 1)
+                };
                 if (a_bits & m) == (b_bits & m) {
                     let network = std::net::Ipv6Addr::from(a_bits & m);
                     let merged = cidr::IpCidr::V6(cidr::Ipv6Cidr::new(network, mask).unwrap());
@@ -339,9 +347,8 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_inet_merge(
                 }
                 mask -= 1;
             }
-            let merged = cidr::IpCidr::V6(
-                cidr::Ipv6Cidr::new(std::net::Ipv6Addr::UNSPECIFIED, 0).unwrap(),
-            );
+            let merged =
+                cidr::IpCidr::V6(cidr::Ipv6Cidr::new(std::net::Ipv6Addr::UNSPECIFIED, 0).unwrap());
             ValueRef::from(Value::cidr_value(merged)).into_raw(ctx)
         }
         _ => panic!("inet_merge() operands must be the same family (v4-v4 or v6-v6)"),

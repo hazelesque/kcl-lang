@@ -61,6 +61,15 @@ impl ValueRef {
                     true
                 }
                 (Value::func_value(a), Value::func_value(b)) => a.fn_ptr == b.fn_ptr,
+                // Mokkan F1.5: typed equality on the new value
+                // variants. Cross-family inet/cidr falls through to
+                // `false` (cidr crate's derived PartialEq handles
+                // that correctly).
+                (Value::cidr_value(a), Value::cidr_value(b)) => a == b,
+                (Value::inet_value(a), Value::inet_value(b)) => a == b,
+                (Value::ip_family_value(a), Value::ip_family_value(b)) => a == b,
+                (Value::macaddr_value(a), Value::macaddr_value(b)) => a == b,
+                (Value::macaddr8_value(a), Value::macaddr8_value(b)) => a == b,
                 _ => false,
             },
         }
@@ -124,6 +133,25 @@ impl ValueRef {
                     }
                     len_a < len_b
                 }
+                _ => panic!(
+                    "'<' not supported between instances of '{}' and '{}'",
+                    self.type_str(),
+                    x.type_str()
+                ),
+            },
+            // Mokkan F1.5: ordering on cidr / inet via the cidr
+            // crate's derived Ord (v4 < v6 across families, then by
+            // address then by masklen within a family).
+            Value::cidr_value(a) => match &*x.rc.borrow() {
+                Value::cidr_value(b) => a < b,
+                _ => panic!(
+                    "'<' not supported between instances of '{}' and '{}'",
+                    self.type_str(),
+                    x.type_str()
+                ),
+            },
+            Value::inet_value(a) => match &*x.rc.borrow() {
+                Value::inet_value(b) => a < b,
                 _ => panic!(
                     "'<' not supported between instances of '{}' and '{}'",
                     self.type_str(),
@@ -198,6 +226,22 @@ impl ValueRef {
                     x.type_str()
                 ),
             },
+            Value::cidr_value(a) => match &*x.rc.borrow() {
+                Value::cidr_value(b) => a <= b,
+                _ => panic!(
+                    "'<=' not supported between instances of '{}' and '{}'",
+                    self.type_str(),
+                    x.type_str()
+                ),
+            },
+            Value::inet_value(a) => match &*x.rc.borrow() {
+                Value::inet_value(b) => a <= b,
+                _ => panic!(
+                    "'<=' not supported between instances of '{}' and '{}'",
+                    self.type_str(),
+                    x.type_str()
+                ),
+            },
             _ => panic!(
                 "'<=' not supported between instances of '{}' and '{}'",
                 self.type_str(),
@@ -266,6 +310,22 @@ impl ValueRef {
                     x.type_str()
                 ),
             },
+            Value::cidr_value(a) => match &*x.rc.borrow() {
+                Value::cidr_value(b) => a > b,
+                _ => panic!(
+                    "'>' not supported between instances of '{}' and '{}'",
+                    self.type_str(),
+                    x.type_str()
+                ),
+            },
+            Value::inet_value(a) => match &*x.rc.borrow() {
+                Value::inet_value(b) => a > b,
+                _ => panic!(
+                    "'>' not supported between instances of '{}' and '{}'",
+                    self.type_str(),
+                    x.type_str()
+                ),
+            },
             _ => panic!(
                 "'>' not supported between instances of '{}' and '{}'",
                 self.type_str(),
@@ -328,6 +388,22 @@ impl ValueRef {
                     }
                     len_a >= len_b
                 }
+                _ => panic!(
+                    "'>=' not supported between instances of '{}' and '{}'",
+                    self.type_str(),
+                    x.type_str()
+                ),
+            },
+            Value::cidr_value(a) => match &*x.rc.borrow() {
+                Value::cidr_value(b) => a >= b,
+                _ => panic!(
+                    "'>=' not supported between instances of '{}' and '{}'",
+                    self.type_str(),
+                    x.type_str()
+                ),
+            },
+            Value::inet_value(a) => match &*x.rc.borrow() {
+                Value::inet_value(b) => a >= b,
                 _ => panic!(
                     "'>=' not supported between instances of '{}' and '{}'",
                     self.type_str(),

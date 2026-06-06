@@ -805,9 +805,9 @@ fn field_kind_for(
         TypeKind::Macaddr8 => FieldKind::Unsupported(
             "macaddr8-typed field (typed-mac codegen lands in F1.6)".to_string(),
         ),
-        TypeKind::IpFamily => FieldKind::Unsupported(
-            "IpFamily-typed field (codegen lands in F1.6)".to_string(),
-        ),
+        TypeKind::IpFamily => {
+            FieldKind::Unsupported("IpFamily-typed field (codegen lands in F1.6)".to_string())
+        }
     }
 }
 
