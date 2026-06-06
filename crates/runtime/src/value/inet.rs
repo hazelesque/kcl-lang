@@ -295,8 +295,10 @@ impl CidrValue {
         match &self.inner {
             CidrInner::Resolved(c) => *c,
             CidrInner::Symbolic(_) => panic!(
-                "expected resolved cidr but got symbolic — \
-                 the F2.2 symbolic-algebra dispatch wires this surface"
+                "expected resolved cidr but got symbolic — D2 forbids deferred predicates \
+                 (no <, ==, contains, etc. on symbolic operands), and schema fields that \
+                 should accept symbolic values must be declared as `cidr | ResolvableString` \
+                 to flow through the F2.7 codegen `Resolvable<T>` shape"
             ),
         }
     }
@@ -359,8 +361,10 @@ impl InetValue {
         match &self.inner {
             InetInner::Resolved(i) => *i,
             InetInner::Symbolic(_) => panic!(
-                "expected resolved inet but got symbolic — \
-                 the F2.2 symbolic-algebra dispatch wires this surface"
+                "expected resolved inet but got symbolic — D2 forbids deferred predicates \
+                 (no <, ==, contains, etc. on symbolic operands), and schema fields that \
+                 should accept symbolic values must be declared as `inet | ResolvableString` \
+                 to flow through the F2.7 codegen `Resolvable<T>` shape"
             ),
         }
     }
@@ -433,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "expected resolved cidr but got symbolic")]
+    #[should_panic(expected = "D2 forbids deferred predicates")]
     fn cidr_value_expect_resolved_panics_on_symbolic() {
         let cv = CidrValue::symbolic(Expr::HandleSubnet {
             handle: HANDLE.to_string(),

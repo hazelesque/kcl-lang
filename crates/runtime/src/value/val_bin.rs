@@ -41,19 +41,37 @@ impl ValueRef {
                 Self::str(format!("{}{}", *a, *b).as_ref())
             }
             // Mokkan F1.5: inet + int / int + inet (offset arithmetic).
-            // Preserves source masklen; overflow panics per inet_add_offset.
-            // F2.1: resolved-only here. F2.2 adds the symbolic arm
-            // (Symbolic(Expr) + int → Symbolic(AddOffset(...))).
-            (Value::inet_value(a), Value::int_value(b)) => {
-                Self::from(Value::inet_value(crate::value::InetValue::resolved(
-                    crate::value::inet_add_offset(a.expect_resolved(), *b),
-                )))
-            }
-            (Value::int_value(a), Value::inet_value(b)) => {
-                Self::from(Value::inet_value(crate::value::InetValue::resolved(
-                    crate::value::inet_add_offset(b.expect_resolved(), *a),
-                )))
-            }
+            // Preserves source masklen; overflow panics per
+            // inet_add_offset. F2.2: symbolic operand → AddOffset
+            // wrapping (Resolved gets lifted to LiteralInet leaf).
+            (Value::inet_value(a), Value::int_value(b)) => match &a.inner {
+                crate::value::InetInner::Resolved(r) => Self::from(Value::inet_value(
+                    crate::value::InetValue::resolved(crate::value::inet_add_offset(*r, *b)),
+                )),
+                crate::value::InetInner::Symbolic(expr) => {
+                    let wrapped = crate::value::Expr::AddOffset(
+                        Box::new(expr.clone()),
+                        Box::new(crate::value::Expr::LiteralInt(*b)),
+                    );
+                    Self::from(Value::inet_value(crate::value::InetValue::symbolic(
+                        wrapped,
+                    )))
+                }
+            },
+            (Value::int_value(a), Value::inet_value(b)) => match &b.inner {
+                crate::value::InetInner::Resolved(r) => Self::from(Value::inet_value(
+                    crate::value::InetValue::resolved(crate::value::inet_add_offset(*r, *a)),
+                )),
+                crate::value::InetInner::Symbolic(expr) => {
+                    let wrapped = crate::value::Expr::AddOffset(
+                        Box::new(expr.clone()),
+                        Box::new(crate::value::Expr::LiteralInt(*a)),
+                    );
+                    Self::from(Value::inet_value(crate::value::InetValue::symbolic(
+                        wrapped,
+                    )))
+                }
+            },
             (Value::list_value(a), _) => {
                 if x.is_list() {
                     let mut list = a.clone();
@@ -109,19 +127,39 @@ impl ValueRef {
             // Mokkan F1.5: inet - int (offset arithmetic, preserves
             // masklen); inet - inet (signed distance, panics on v6
             // overflow). Same-family only — cross-family panics.
-            // F2.1: resolved-only here; F2.2 adds symbolic arms per D4.
-            (Value::inet_value(a), Value::int_value(b)) => {
-                let neg = b
-                    .checked_neg()
-                    .unwrap_or_else(|| panic!("inet - int: cannot negate {b} (i64::MIN overflow)"));
-                Self::from(Value::inet_value(crate::value::InetValue::resolved(
-                    crate::value::inet_add_offset(a.expect_resolved(), neg),
-                )))
-            }
-            (Value::inet_value(a), Value::inet_value(b)) => Self::int(crate::value::inet_distance(
-                a.expect_resolved(),
-                b.expect_resolved(),
-            )),
+            // F2.2: symbolic `inet - int` lifts to SubOffset; symbolic
+            // `inet - inet` is D4 err (the resulting int isn't usable
+            // by any symbolic-int consumer at F2.2 — F2.4 may revisit).
+            (Value::inet_value(a), Value::int_value(b)) => match &a.inner {
+                crate::value::InetInner::Resolved(r) => {
+                    let neg = b.checked_neg().unwrap_or_else(|| {
+                        panic!("inet - int: cannot negate {b} (i64::MIN overflow)")
+                    });
+                    Self::from(Value::inet_value(crate::value::InetValue::resolved(
+                        crate::value::inet_add_offset(*r, neg),
+                    )))
+                }
+                crate::value::InetInner::Symbolic(expr) => {
+                    let wrapped = crate::value::Expr::SubOffset(
+                        Box::new(expr.clone()),
+                        Box::new(crate::value::Expr::LiteralInt(*b)),
+                    );
+                    Self::from(Value::inet_value(crate::value::InetValue::symbolic(
+                        wrapped,
+                    )))
+                }
+            },
+            (Value::inet_value(a), Value::inet_value(b)) => match (&a.inner, &b.inner) {
+                (crate::value::InetInner::Resolved(ra), crate::value::InetInner::Resolved(rb)) => {
+                    Self::int(crate::value::inet_distance(*ra, *rb))
+                }
+                _ => panic!(
+                    "inet - inet on symbolic operands is D4 err — the resulting symbolic int \
+                         has no value-level carrier at F2.2 (F2.4 may revisit via \
+                         ResolvableString). Restructure to compute the distance against \
+                         resolved values, or compose offsets before deriving."
+                ),
+            },
             _ => panic_unsupported_bin_op!("-", self.type_str(), x.type_str()),
         }
     }
@@ -465,5 +503,112 @@ mod test_value_bin {
             let result = data.bin_subscr(&key).as_int();
             assert_eq!(result, expected);
         }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // F2.2: symbolic-arm dispatch on inet operator overloads.
+    // ────────────────────────────────────────────────────────────────
+
+    use crate::value::{Expr, InetInner, InetValue, IpFamily};
+
+    const HANDLE: &str = "lan";
+
+    /// Build a symbolic InetValue carrying a single HandleSubnet leaf.
+    /// The handle-as-leaf is the canonical symbolic-inet shape that
+    /// F2.5's `symbolic_inet` builtin will produce; this stand-in lets
+    /// the operator-overload arms be tested before that wiring lands.
+    fn sym_inet() -> ValueRef {
+        let e = Expr::HandleSubnet {
+            handle: HANDLE.to_string(),
+            size: Some(24),
+            family: Some(IpFamily::V4),
+        };
+        ValueRef::from(Value::inet_value(InetValue::symbolic(e)))
+    }
+
+    fn assert_inet_symbolic_matches(v: &ValueRef, want: Expr) {
+        let borrow = v.rc.borrow();
+        match &*borrow {
+            Value::inet_value(iv) => match &iv.inner {
+                InetInner::Symbolic(e) => assert_eq!(*e, want, "symbolic Expr mismatch"),
+                InetInner::Resolved(_) => panic!("expected Symbolic, got Resolved"),
+            },
+            _ => panic!("expected inet_value variant"),
+        }
+    }
+
+    /// F2.2 / D4: `symbolic_inet + int` → `Symbolic(AddOffset(handle, int))`.
+    /// Source masklen / handle are preserved verbatim through the
+    /// wrapping (no eager evaluation of the symbolic leaf).
+    #[test]
+    fn symbolic_inet_plus_int_wraps_in_add_offset() {
+        let mut ctx = Context::new();
+        let sym = sym_inet();
+        let result = sym.bin_add(&mut ctx, &ValueRef::int(10));
+        assert_inet_symbolic_matches(
+            &result,
+            Expr::AddOffset(
+                Box::new(Expr::HandleSubnet {
+                    handle: HANDLE.to_string(),
+                    size: Some(24),
+                    family: Some(IpFamily::V4),
+                }),
+                Box::new(Expr::LiteralInt(10)),
+            ),
+        );
+    }
+
+    /// Commutative: `int + symbolic_inet` lands at the same Expr.
+    #[test]
+    fn int_plus_symbolic_inet_wraps_in_add_offset() {
+        let mut ctx = Context::new();
+        let sym = sym_inet();
+        let result = ValueRef::int(10).bin_add(&mut ctx, &sym);
+        assert_inet_symbolic_matches(
+            &result,
+            Expr::AddOffset(
+                Box::new(Expr::HandleSubnet {
+                    handle: HANDLE.to_string(),
+                    size: Some(24),
+                    family: Some(IpFamily::V4),
+                }),
+                Box::new(Expr::LiteralInt(10)),
+            ),
+        );
+    }
+
+    /// F2.2: `symbolic_inet - int` → `Symbolic(SubOffset(handle, int))`.
+    /// Note: this is `SubOffset`, not `AddOffset(handle, -int)` — the
+    /// IR preserves the operator the source used, which the resolver
+    /// can later inspect for diagnostics.
+    #[test]
+    fn symbolic_inet_minus_int_wraps_in_sub_offset() {
+        let mut ctx = Context::new();
+        let sym = sym_inet();
+        let result = sym.bin_sub(&mut ctx, &ValueRef::int(5));
+        assert_inet_symbolic_matches(
+            &result,
+            Expr::SubOffset(
+                Box::new(Expr::HandleSubnet {
+                    handle: HANDLE.to_string(),
+                    size: Some(24),
+                    family: Some(IpFamily::V4),
+                }),
+                Box::new(Expr::LiteralInt(5)),
+            ),
+        );
+    }
+
+    /// F2.2 / D4: `symbolic_inet - symbolic_inet` is err. The
+    /// resulting symbolic int has no value-level carrier until F2.4's
+    /// ResolvableString lands; rather than half-implement, we panic
+    /// with a deferral-pointing message.
+    #[test]
+    #[should_panic(expected = "inet - inet on symbolic operands is D4 err")]
+    fn symbolic_inet_minus_symbolic_inet_panics() {
+        let mut ctx = Context::new();
+        let a = sym_inet();
+        let b = sym_inet();
+        let _ = a.bin_sub(&mut ctx, &b);
     }
 }

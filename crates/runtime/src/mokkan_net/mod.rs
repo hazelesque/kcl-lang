@@ -48,11 +48,19 @@ fn arg_as_inet(value: &ValueRef, func: &str, arg: &str) -> cidr::IpInet {
         None => value.rc.borrow(),
     };
     match &*view {
-        // F2.1: panic on symbolic operands here — F2.2 introduces
-        // per-function symbolic-arm dispatch, which will replace each
-        // panic with the typed propagation rule from the D4 matrix.
-        // Until then, callers operate on resolved values only.
-        Value::inet_value(i) => i.expect_resolved(),
+        // F2.2: used only by predicate / classifier functions that
+        // produce bool — they panic on symbolic per D2 ("no deferred
+        // predicates, structurally enforced"). The derivation
+        // functions use `inet_state` instead so they can propagate
+        // symbolic through to the result.
+        Value::inet_value(i) => match &i.inner {
+            crate::value::InetInner::Resolved(r) => *r,
+            crate::value::InetInner::Symbolic(_) => panic!(
+                "{func}() cannot evaluate on symbolic inet (D2: symbolic mode is \
+                 value-derivation only, not value-decision). Either resolve the \
+                 expression first or restructure to compare resolved values."
+            ),
+        },
         _ => panic!(
             "{func}() expected inet for argument '{arg}', got {} ({})",
             value.type_str(),
@@ -64,7 +72,7 @@ fn arg_as_inet(value: &ValueRef, func: &str, arg: &str) -> cidr::IpInet {
 /// Same as `arg_as_inet` but for the strict `cidr` shape (host
 /// bits must be zero — D8 strictness). Used by predicates that
 /// only make sense on canonical networks (`contains`, `overlaps`,
-/// etc.) and by `inet_merge` for type consistency on its result.
+/// etc.) — those panic on symbolic per D2 (no deferred predicates).
 fn arg_as_cidr(value: &ValueRef, func: &str, arg: &str) -> cidr::IpCidr {
     let coerced = try_coerce_mokkan_inet(value, MOKKAN_TYPE_CIDR);
     let view = match coerced.as_ref() {
@@ -72,7 +80,14 @@ fn arg_as_cidr(value: &ValueRef, func: &str, arg: &str) -> cidr::IpCidr {
         None => value.rc.borrow(),
     };
     match &*view {
-        Value::cidr_value(c) => c.expect_resolved(),
+        Value::cidr_value(c) => match &c.inner {
+            crate::value::CidrInner::Resolved(r) => *r,
+            crate::value::CidrInner::Symbolic(_) => panic!(
+                "{func}() cannot evaluate on symbolic cidr (D2: symbolic mode is \
+                 value-derivation only, not value-decision). Either resolve the \
+                 expression first or restructure to compare resolved values."
+            ),
+        },
         _ => panic!(
             "{func}() expected cidr for argument '{arg}', got {} ({})",
             value.type_str(),
@@ -94,6 +109,100 @@ fn arg_as_int(value: &ValueRef, func: &str, arg: &str) -> i64 {
     }
 }
 
+// ============================================================================
+// F2.2: dual-state argument extraction + per-function symbolic dispatch.
+// ============================================================================
+//
+// Every algebra function below gets an outer match on operand state:
+//
+//   - Resolved → existing F1 eager path, unchanged.
+//   - Symbolic → wrap operand(s) into the matching `Expr` node and
+//     produce a symbolic result of the appropriate type.
+//
+// Predicates (`contains`, `overlaps`, etc.) panic on any-symbolic
+// operand per D2 — symbolic mode is value-derivation, not
+// value-decision. Stringification (`text`, `host`, `abbrev`,
+// `masklen`) on symbolic input is deferred to F2.4 (needs
+// `ResolvableString`); F2.2 panics with a clear "F2.4 wires this"
+// message until then.
+
+/// State-extracted inet operand. `Resolved` matches the F1 case; the
+/// resolved IpInet is Copy so it's carried by value. `Symbolic`
+/// clones the inner Expr so the helper signature is owned (callers
+/// build new Exprs that wrap the operand).
+enum InetState {
+    Resolved(cidr::IpInet),
+    Symbolic(Expr),
+}
+
+/// State-extracted cidr operand. Mirror of `InetState`.
+enum CidrState {
+    Resolved(cidr::IpCidr),
+    Symbolic(Expr),
+}
+
+/// Extract an inet operand's state. Includes the F1.3 string-coercion
+/// surface (so `net.broadcast("10.0.0.1/24")` still works the same).
+/// String-coerced values are always Resolved by construction — strings
+/// can't carry symbolic IR.
+fn inet_state(value: &ValueRef, func: &str, arg: &str) -> InetState {
+    let coerced = try_coerce_mokkan_inet(value, MOKKAN_TYPE_INET);
+    let view = match coerced.as_ref() {
+        Some(v) => v.rc.borrow(),
+        None => value.rc.borrow(),
+    };
+    match &*view {
+        Value::inet_value(i) => match &i.inner {
+            crate::value::InetInner::Resolved(r) => InetState::Resolved(*r),
+            crate::value::InetInner::Symbolic(e) => InetState::Symbolic(e.clone()),
+        },
+        _ => panic!(
+            "{func}() expected inet for argument '{arg}', got {} ({})",
+            value.type_str(),
+            value,
+        ),
+    }
+}
+
+/// Extract a cidr operand's state. Mirror of `inet_state`.
+fn cidr_state(value: &ValueRef, func: &str, arg: &str) -> CidrState {
+    let coerced = try_coerce_mokkan_inet(value, MOKKAN_TYPE_CIDR);
+    let view = match coerced.as_ref() {
+        Some(v) => v.rc.borrow(),
+        None => value.rc.borrow(),
+    };
+    match &*view {
+        Value::cidr_value(c) => match &c.inner {
+            crate::value::CidrInner::Resolved(r) => CidrState::Resolved(*r),
+            crate::value::CidrInner::Symbolic(e) => CidrState::Symbolic(e.clone()),
+        },
+        _ => panic!(
+            "{func}() expected cidr for argument '{arg}', got {} ({})",
+            value.type_str(),
+            value,
+        ),
+    }
+}
+
+/// Lift an `InetState` to an Expr: Resolved becomes a LiteralInet leaf;
+/// Symbolic returns its inner Expr unchanged. Used by binary functions
+/// that go symbolic when any operand is symbolic — both operands need
+/// to be Exprs to compose into the result IR.
+fn inet_as_expr(state: InetState) -> Expr {
+    match state {
+        InetState::Resolved(i) => Expr::LiteralInet(i),
+        InetState::Symbolic(e) => e,
+    }
+}
+
+/// Mirror of `inet_as_expr` for cidr operands.
+fn cidr_as_expr(state: CidrState) -> Expr {
+    match state {
+        CidrState::Resolved(c) => Expr::LiteralCidr(c),
+        CidrState::Symbolic(e) => e,
+    }
+}
+
 /// PostgreSQL `host(inet) -> text`: text form of the address
 /// without the masklen.
 #[unsafe(no_mangle)]
@@ -107,8 +216,21 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_host(
     let ctx = unsafe { mut_ptr_as_ref(ctx) };
     let addr = get_call_arg(args, kwargs, 0, Some("addr"))
         .unwrap_or_else(|| panic!("host() missing required argument 'addr'"));
-    let inet = arg_as_inet(&addr, "host", "addr");
-    ValueRef::str(inet.address().to_string().as_ref()).into_raw(ctx)
+    match inet_state(&addr, "host", "addr") {
+        InetState::Resolved(inet) => {
+            ValueRef::str(inet.address().to_string().as_ref()).into_raw(ctx)
+        }
+        InetState::Symbolic(_) => {
+            // D4: symbolic host(inet) → ResolvableString carrying
+            // `Host(<inner>)`. F2.4 wires the ResolvableString carrier
+            // and the stringification dispatch; F2.2 panics explicitly
+            // so a regression doesn't fall through silently.
+            panic!(
+                "host(symbolic inet) deferred to F2.4 — needs ResolvableString \
+                 (`Segment::Symbolic(Host(<inner>))`)"
+            );
+        }
+    }
 }
 
 /// PostgreSQL `masklen(inet) -> int`: the network mask length.
@@ -123,8 +245,21 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_masklen(
     let ctx = unsafe { mut_ptr_as_ref(ctx) };
     let addr = get_call_arg(args, kwargs, 0, Some("addr"))
         .unwrap_or_else(|| panic!("masklen() missing required argument 'addr'"));
-    let inet = arg_as_inet(&addr, "masklen", "addr");
-    ValueRef::int(i64::from(inet.network_length())).into_raw(ctx)
+    match inet_state(&addr, "masklen", "addr") {
+        InetState::Resolved(inet) => ValueRef::int(i64::from(inet.network_length())).into_raw(ctx),
+        InetState::Symbolic(_) => {
+            // D4: symbolic masklen(inet) produces a symbolic int.
+            // Symbolic ints are usable only by `set_masklen` or by
+            // stringification (`text(<int>)`); we don't have a
+            // value-level carrier for them yet. F2.4 introduces
+            // ResolvableString which serves as the deferred-value
+            // wrapper for the masklen case.
+            panic!(
+                "masklen(symbolic inet) deferred to F2.4 — symbolic int carrier \
+                 (ResolvableString wrapping MaskLen(<inner>)) not yet wired"
+            );
+        }
+    }
 }
 
 /// PostgreSQL `netmask(inet) -> inet`: the netmask as an inet
@@ -140,11 +275,22 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_netmask(
     let ctx = unsafe { mut_ptr_as_ref(ctx) };
     let addr = get_call_arg(args, kwargs, 0, Some("addr"))
         .unwrap_or_else(|| panic!("netmask() missing required argument 'addr'"));
-    let inet = arg_as_inet(&addr, "netmask", "addr");
-    let netmask = inet.mask();
-    let result =
-        cidr::IpInet::new(netmask, inet.network_length()).expect("masklen valid for resolved inet");
-    ValueRef::from(Value::inet_value(crate::value::InetValue::resolved(result))).into_raw(ctx)
+    match inet_state(&addr, "netmask", "addr") {
+        InetState::Resolved(inet) => {
+            let netmask = inet.mask();
+            let result = cidr::IpInet::new(netmask, inet.network_length())
+                .expect("masklen valid for resolved inet");
+            ValueRef::from(Value::inet_value(crate::value::InetValue::resolved(result)))
+                .into_raw(ctx)
+        }
+        InetState::Symbolic(expr) => {
+            let wrapped = Expr::NetmaskOf(Box::new(expr));
+            ValueRef::from(Value::inet_value(crate::value::InetValue::symbolic(
+                wrapped,
+            )))
+            .into_raw(ctx)
+        }
+    }
 }
 
 /// PostgreSQL `hostmask(inet) -> inet`: the host mask as an inet
@@ -160,15 +306,30 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_hostmask(
     let ctx = unsafe { mut_ptr_as_ref(ctx) };
     let addr = get_call_arg(args, kwargs, 0, Some("addr"))
         .unwrap_or_else(|| panic!("hostmask() missing required argument 'addr'"));
-    let inet = arg_as_inet(&addr, "hostmask", "addr");
-    let netmask = inet.mask();
-    let hostmask = match netmask {
-        std::net::IpAddr::V4(v4) => std::net::IpAddr::V4(std::net::Ipv4Addr::from(!v4.to_bits())),
-        std::net::IpAddr::V6(v6) => std::net::IpAddr::V6(std::net::Ipv6Addr::from(!v6.to_bits())),
-    };
-    let result = cidr::IpInet::new(hostmask, inet.network_length())
-        .expect("masklen valid for resolved inet");
-    ValueRef::from(Value::inet_value(crate::value::InetValue::resolved(result))).into_raw(ctx)
+    match inet_state(&addr, "hostmask", "addr") {
+        InetState::Resolved(inet) => {
+            let netmask = inet.mask();
+            let hostmask = match netmask {
+                std::net::IpAddr::V4(v4) => {
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::from(!v4.to_bits()))
+                }
+                std::net::IpAddr::V6(v6) => {
+                    std::net::IpAddr::V6(std::net::Ipv6Addr::from(!v6.to_bits()))
+                }
+            };
+            let result = cidr::IpInet::new(hostmask, inet.network_length())
+                .expect("masklen valid for resolved inet");
+            ValueRef::from(Value::inet_value(crate::value::InetValue::resolved(result)))
+                .into_raw(ctx)
+        }
+        InetState::Symbolic(expr) => {
+            let wrapped = Expr::HostmaskOf(Box::new(expr));
+            ValueRef::from(Value::inet_value(crate::value::InetValue::symbolic(
+                wrapped,
+            )))
+            .into_raw(ctx)
+        }
+    }
 }
 
 /// PostgreSQL `network(inet) -> cidr`: the network portion (host
@@ -184,11 +345,19 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_network(
     let ctx = unsafe { mut_ptr_as_ref(ctx) };
     let addr = get_call_arg(args, kwargs, 0, Some("addr"))
         .unwrap_or_else(|| panic!("network() missing required argument 'addr'"));
-    let inet = arg_as_inet(&addr, "network", "addr");
-    ValueRef::from(Value::cidr_value(crate::value::CidrValue::resolved(
-        inet.network(),
-    )))
-    .into_raw(ctx)
+    match inet_state(&addr, "network", "addr") {
+        InetState::Resolved(inet) => ValueRef::from(Value::cidr_value(
+            crate::value::CidrValue::resolved(inet.network()),
+        ))
+        .into_raw(ctx),
+        InetState::Symbolic(expr) => {
+            let wrapped = Expr::NetworkOf(Box::new(expr));
+            ValueRef::from(Value::cidr_value(crate::value::CidrValue::symbolic(
+                wrapped,
+            )))
+            .into_raw(ctx)
+        }
+    }
 }
 
 /// PostgreSQL `set_masklen(inet, int) -> inet`: set the network
@@ -207,22 +376,42 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_set_masklen(
         .unwrap_or_else(|| panic!("set_masklen() missing required argument 'addr'"));
     let masklen = get_call_arg(args, kwargs, 1, Some("masklen"))
         .unwrap_or_else(|| panic!("set_masklen() missing required argument 'masklen'"));
-    let inet = arg_as_inet(&addr, "set_masklen", "addr");
     let new_mask = arg_as_int(&masklen, "set_masklen", "masklen");
-    // Family-appropriate range. v4: 0..=32; v6: 0..=128.
-    let max_mask = match inet {
-        cidr::IpInet::V4(_) => 32,
-        cidr::IpInet::V6(_) => 128,
-    };
-    if new_mask < 0 || new_mask > max_mask {
-        panic!(
-            "set_masklen() masklen {new_mask} out of range for v{} inet (expected 0..={max_mask})",
-            if max_mask == 32 { "4" } else { "6" }
-        );
+    match inet_state(&addr, "set_masklen", "addr") {
+        InetState::Resolved(inet) => {
+            // Family-appropriate range. v4: 0..=32; v6: 0..=128.
+            let max_mask = match inet {
+                cidr::IpInet::V4(_) => 32,
+                cidr::IpInet::V6(_) => 128,
+            };
+            if new_mask < 0 || new_mask > max_mask {
+                panic!(
+                    "set_masklen() masklen {new_mask} out of range for v{} inet \
+                     (expected 0..={max_mask})",
+                    if max_mask == 32 { "4" } else { "6" }
+                );
+            }
+            let result = cidr::IpInet::new(inet.address(), new_mask as u8)
+                .expect("masklen bounds checked above");
+            ValueRef::from(Value::inet_value(crate::value::InetValue::resolved(result)))
+                .into_raw(ctx)
+        }
+        InetState::Symbolic(expr) => {
+            // D4 note: `set_masklen` invalidates the source handle's
+            // declared `size` annotation — after the operation, the
+            // value has the new mask, not the source's. The IR
+            // doesn't propagate the original size annotation; the
+            // resolver re-derives from the SetMasklen literal at
+            // resolve time. Range-check is deferred to resolution
+            // (the resolver knows the family) — we don't have that
+            // information here without recursing the Expr tree.
+            let wrapped = Expr::SetMasklen(Box::new(expr), Box::new(Expr::LiteralInt(new_mask)));
+            ValueRef::from(Value::inet_value(crate::value::InetValue::symbolic(
+                wrapped,
+            )))
+            .into_raw(ctx)
+        }
     }
-    let result =
-        cidr::IpInet::new(inet.address(), new_mask as u8).expect("masklen bounds checked above");
-    ValueRef::from(Value::inet_value(crate::value::InetValue::resolved(result))).into_raw(ctx)
 }
 
 /// PostgreSQL `text(inet) -> text`: canonical text form including
@@ -238,8 +427,17 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_text(
     let ctx = unsafe { mut_ptr_as_ref(ctx) };
     let addr = get_call_arg(args, kwargs, 0, Some("addr"))
         .unwrap_or_else(|| panic!("text() missing required argument 'addr'"));
-    let inet = arg_as_inet(&addr, "text", "addr");
-    ValueRef::str(inet.to_string().as_ref()).into_raw(ctx)
+    match inet_state(&addr, "text", "addr") {
+        InetState::Resolved(inet) => ValueRef::str(inet.to_string().as_ref()).into_raw(ctx),
+        InetState::Symbolic(_) => {
+            // D4: symbolic text(inet) → ResolvableString with
+            // `Segment::Symbolic(Text(<inner>))`. F2.4 wires it.
+            panic!(
+                "text(symbolic inet) deferred to F2.4 — needs ResolvableString \
+                 (`Segment::Symbolic(Text(<inner>))`)"
+            );
+        }
+    }
 }
 
 /// PostgreSQL `abbrev(inet) -> text`: same as text() but suppresses
@@ -256,17 +454,28 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_abbrev(
     let ctx = unsafe { mut_ptr_as_ref(ctx) };
     let addr = get_call_arg(args, kwargs, 0, Some("addr"))
         .unwrap_or_else(|| panic!("abbrev() missing required argument 'addr'"));
-    let inet = arg_as_inet(&addr, "abbrev", "addr");
-    let suppress = matches!(
-        (inet, inet.network_length()),
-        (cidr::IpInet::V4(_), 32) | (cidr::IpInet::V6(_), 128)
-    );
-    let text = if suppress {
-        inet.address().to_string()
-    } else {
-        inet.to_string()
-    };
-    ValueRef::str(text.as_ref()).into_raw(ctx)
+    match inet_state(&addr, "abbrev", "addr") {
+        InetState::Resolved(inet) => {
+            let suppress = matches!(
+                (inet, inet.network_length()),
+                (cidr::IpInet::V4(_), 32) | (cidr::IpInet::V6(_), 128)
+            );
+            let text = if suppress {
+                inet.address().to_string()
+            } else {
+                inet.to_string()
+            };
+            ValueRef::str(text.as_ref()).into_raw(ctx)
+        }
+        InetState::Symbolic(_) => {
+            // D4: symbolic abbrev(inet) → ResolvableString with
+            // `Segment::Symbolic(Abbrev(<inner>))`. F2.4 wires it.
+            panic!(
+                "abbrev(symbolic inet) deferred to F2.4 — needs ResolvableString \
+                 (`Segment::Symbolic(Abbrev(<inner>))`)"
+            );
+        }
+    }
 }
 
 /// Mokkan `family(inet) -> IpFamily`: typed enum return. Diverges
@@ -284,9 +493,27 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_family(
     let ctx = unsafe { mut_ptr_as_ref(ctx) };
     let addr = get_call_arg(args, kwargs, 0, Some("addr"))
         .unwrap_or_else(|| panic!("family() missing required argument 'addr'"));
-    let inet = arg_as_inet(&addr, "family", "addr");
-    let family = IpFamily::of_inet(&inet);
-    ValueRef::from(Value::ip_family_value(family)).into_raw(ctx)
+    match inet_state(&addr, "family", "addr") {
+        InetState::Resolved(inet) => {
+            let family = IpFamily::of_inet(&inet);
+            ValueRef::from(Value::ip_family_value(family)).into_raw(ctx)
+        }
+        InetState::Symbolic(_) => {
+            // D4: `family(symbolic)` is **err** — explicit decision
+            // per the matrix and the surrounding notes. Family is a
+            // metadata query, not a value derivation; symbolic mode
+            // is for derivation only (D2 spirit). Operators have
+            // family eagerly available via the network's
+            // `NetworkDefinition.family` declaration; reading
+            // `config.networks["lan"].family` gives the answer
+            // without going through symbolic mode.
+            panic!(
+                "family() on symbolic inet: metadata queries cannot be deferred. \
+                 Read the family from the source network declaration instead \
+                 (e.g., `config.networks[\"<handle>\"].family`)."
+            );
+        }
+    }
 }
 
 /// PostgreSQL `inet_merge(inet, inet) -> cidr`: smallest cidr
@@ -305,8 +532,23 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_inet_merge(
         .unwrap_or_else(|| panic!("inet_merge() missing required argument 'a'"));
     let b = get_call_arg(args, kwargs, 1, Some("b"))
         .unwrap_or_else(|| panic!("inet_merge() missing required argument 'b'"));
-    let a = arg_as_inet(&a, "inet_merge", "a");
-    let b = arg_as_inet(&b, "inet_merge", "b");
+    let a_state = inet_state(&a, "inet_merge", "a");
+    let b_state = inet_state(&b, "inet_merge", "b");
+    // Any-symbolic → wrap. Resolver enforces family match at resolve
+    // time per D4 ("resolver enforces operands resolve to the same
+    // family; otherwise ResolverError::FamilyMismatch").
+    let (a, b) = match (a_state, b_state) {
+        (InetState::Resolved(a), InetState::Resolved(b)) => (a, b),
+        (a_state, b_state) => {
+            let a_expr = inet_as_expr(a_state);
+            let b_expr = inet_as_expr(b_state);
+            let wrapped = Expr::InetMerge(Box::new(a_expr), Box::new(b_expr));
+            return ValueRef::from(Value::cidr_value(crate::value::CidrValue::symbolic(
+                wrapped,
+            )))
+            .into_raw(ctx);
+        }
+    };
     match (a, b) {
         (cidr::IpInet::V4(av), cidr::IpInet::V4(bv)) => {
             // Walk masks from current down to /0 until the two
@@ -651,24 +893,34 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_broadcast(
     let addr = get_call_arg(args, kwargs, 0, Some("addr"))
         .unwrap_or_else(|| panic!("broadcast() missing required argument 'addr'"));
 
-    let inet = arg_as_inet(&addr, "broadcast", "addr");
-
-    // `cidr::IpInet::network()` produces a strict cidr; the
-    // broadcast address is then the largest host within. The `cidr`
-    // crate exposes `.last_address()` directly on `IpCidr` /
-    // `Ipv4Cidr` / `Ipv6Cidr`. We construct the output inet with
-    // the same masklen as the input so the output preserves the
-    // network context.
-    let network = inet.network();
-    let broadcast = network.last_address();
-    // Reconstruct an IpInet at the same network mask the source had.
-    // (For v4, the broadcast address has host bits all 1 inside the
-    // /N. For v6, "broadcast" is convention rather than protocol;
-    // PG follows the same construction, we mirror that.)
-    let result = cidr::IpInet::new(broadcast, inet.network_length())
-        .expect("masklen valid for resolved inet");
-
-    ValueRef::from(Value::inet_value(crate::value::InetValue::resolved(result))).into_raw(ctx)
+    match inet_state(&addr, "broadcast", "addr") {
+        InetState::Resolved(inet) => {
+            // `cidr::IpInet::network()` produces a strict cidr; the
+            // broadcast address is then the largest host within. The
+            // `cidr` crate exposes `.last_address()` directly on
+            // `IpCidr` / `Ipv4Cidr` / `Ipv6Cidr`. We construct the
+            // output inet with the same masklen as the input so the
+            // output preserves the network context.
+            let network = inet.network();
+            let broadcast = network.last_address();
+            // Reconstruct an IpInet at the same network mask the
+            // source had. (For v4, the broadcast address has host
+            // bits all 1 inside the /N. For v6, "broadcast" is
+            // convention rather than protocol; PG follows the same
+            // construction, we mirror that.)
+            let result = cidr::IpInet::new(broadcast, inet.network_length())
+                .expect("masklen valid for resolved inet");
+            ValueRef::from(Value::inet_value(crate::value::InetValue::resolved(result)))
+                .into_raw(ctx)
+        }
+        InetState::Symbolic(expr) => {
+            let wrapped = Expr::BroadcastOf(Box::new(expr));
+            ValueRef::from(Value::inet_value(crate::value::InetValue::symbolic(
+                wrapped,
+            )))
+            .into_raw(ctx)
+        }
+    }
 }
 
 // F1.7: stringly-typed survivors from upstream KCL's `net` package.
@@ -846,4 +1098,120 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_fqdn(
     _kwargs: *const kcl_value_ref_t,
 ) -> *const kcl_value_ref_t {
     panic!("fqdn() does not support the WASM target");
+}
+
+#[cfg(test)]
+mod f2_2_dispatch_tests {
+    //! F2.2 dispatch-helper tests.
+    //!
+    //! These exercise the `inet_state` / `cidr_state` extraction +
+    //! `inet_as_expr` / `cidr_as_expr` lifting helpers that every
+    //! F2.2 algebra dispatch arm leans on. The C-ABI surface itself
+    //! is exercised end-to-end through the embed integration tests
+    //! once F2.5's `net_symbolic.*` builtins land — until then
+    //! there's no KCL-source path that produces symbolic values to
+    //! flow through the algebra functions.
+
+    use super::*;
+    use crate::value::{CidrInner, CidrValue, Expr, InetInner, InetValue, IpFamily};
+    use std::str::FromStr;
+
+    // Literal-once-per-test pattern (see inet.rs F2.1 tests).
+    const ISTR: &str = "10.0.0.10/24";
+    const CSTR: &str = "10.0.0.0/24";
+    const HANDLE: &str = "lan";
+
+    fn sym_handle_expr() -> Expr {
+        Expr::HandleSubnet {
+            handle: HANDLE.to_string(),
+            size: Some(24),
+            family: Some(IpFamily::V4),
+        }
+    }
+
+    /// `inet_state` on a Resolved inet returns the underlying IpInet.
+    #[test]
+    fn inet_state_extracts_resolved() {
+        let i = cidr::IpInet::from_str(ISTR).unwrap();
+        let v = ValueRef::from(Value::inet_value(InetValue::resolved(i)));
+        match inet_state(&v, "test", "addr") {
+            InetState::Resolved(r) => assert_eq!(r, i),
+            InetState::Symbolic(_) => panic!("expected Resolved"),
+        }
+    }
+
+    /// `inet_state` on a Symbolic inet returns the inner Expr (cloned).
+    #[test]
+    fn inet_state_extracts_symbolic() {
+        let e = sym_handle_expr();
+        let v = ValueRef::from(Value::inet_value(InetValue::symbolic(e.clone())));
+        match inet_state(&v, "test", "addr") {
+            InetState::Symbolic(got) => assert_eq!(got, e),
+            InetState::Resolved(_) => panic!("expected Symbolic"),
+        }
+    }
+
+    /// `inet_state` still honours the F1.3 string-coercion surface —
+    /// a `str_value` parsable as inet comes through as Resolved.
+    #[test]
+    fn inet_state_coerces_string_to_resolved() {
+        let v = ValueRef::str(ISTR);
+        match inet_state(&v, "test", "addr") {
+            InetState::Resolved(r) => assert_eq!(r, cidr::IpInet::from_str(ISTR).unwrap()),
+            InetState::Symbolic(_) => panic!("string coercion should land Resolved"),
+        }
+    }
+
+    /// `cidr_state` on a Resolved cidr.
+    #[test]
+    fn cidr_state_extracts_resolved() {
+        let c = cidr::IpCidr::from_str(CSTR).unwrap();
+        let v = ValueRef::from(Value::cidr_value(CidrValue::resolved(c)));
+        match cidr_state(&v, "test", "addr") {
+            CidrState::Resolved(r) => assert_eq!(r, c),
+            CidrState::Symbolic(_) => panic!("expected Resolved"),
+        }
+    }
+
+    /// `inet_as_expr`: Resolved lifts to `LiteralInet`; Symbolic
+    /// returns the inner Expr unchanged.
+    #[test]
+    fn inet_as_expr_lifts_resolved_to_literal() {
+        let i = cidr::IpInet::from_str(ISTR).unwrap();
+        assert_eq!(inet_as_expr(InetState::Resolved(i)), Expr::LiteralInet(i));
+    }
+
+    #[test]
+    fn inet_as_expr_passes_through_symbolic() {
+        let e = sym_handle_expr();
+        assert_eq!(inet_as_expr(InetState::Symbolic(e.clone())), e);
+    }
+
+    #[test]
+    fn cidr_as_expr_lifts_resolved_to_literal() {
+        let c = cidr::IpCidr::from_str(CSTR).unwrap();
+        assert_eq!(cidr_as_expr(CidrState::Resolved(c)), Expr::LiteralCidr(c));
+    }
+
+    /// `arg_as_inet` (used by predicates) panics with a D2-flavoured
+    /// message on symbolic input. Locks in the message shape so a
+    /// regression that re-introduces the F2.1 generic panic is
+    /// caught here.
+    #[test]
+    #[should_panic(expected = "D2: symbolic mode is value-derivation only")]
+    fn arg_as_inet_panics_on_symbolic_with_d2_message() {
+        let v = ValueRef::from(Value::inet_value(InetValue::symbolic(sym_handle_expr())));
+        let _ = arg_as_inet(&v, "contains", "outer");
+    }
+
+    /// Mirror for `arg_as_cidr`.
+    #[test]
+    #[should_panic(expected = "D2: symbolic mode is value-derivation only")]
+    fn arg_as_cidr_panics_on_symbolic_with_d2_message() {
+        let e = sym_handle_expr();
+        let v = ValueRef::from(Value::cidr_value(CidrValue::symbolic(e)));
+        let _ = arg_as_cidr(&v, "contains", "outer");
+        // Suppress unused-variant warning.
+        let _ = CidrInner::Resolved;
+    }
 }
