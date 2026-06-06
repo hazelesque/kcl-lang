@@ -1207,3 +1207,89 @@ fn mokkan_typed_value_accessors_yield_typed_payloads() {
     assert!(fam.is_ip_family());
     assert_eq!(fam.as_ip_family(), kcl_runtime::IpFamily::V6);
 }
+
+/// F1.7 — the three stringly-typed survivors from upstream KCL's
+/// deleted `net` package (`fqdn`, `split_host_port`,
+/// `join_host_port`) now live under `mokkan.net` per F1.4.bis.
+/// Same signatures, same semantics; only the import path changes.
+#[test]
+fn mokkan_net_stringly_typed_survivors_split_join_roundtrip() {
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "import mokkan.net\n",
+                "\n",
+                "schema Cfg:\n",
+                "    v4_pair: [str]\n",
+                "    v6_pair: [str]\n",
+                "    v4_joined: str\n",
+                "    v6_joined: str\n",
+                "\n",
+                "cfg = Cfg {\n",
+                "    v4_pair = net.split_host_port(\"10.0.0.1:8080\")\n",
+                "    v6_pair = net.split_host_port(\"[::1]:8080\")\n",
+                "    v4_joined = net.join_host_port(\"10.0.0.1\", \"8080\")\n",
+                "    v6_joined = net.join_host_port(\"::1\", \"8080\")\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+    let v4 = cfg.dict_get_value("v4_pair").unwrap();
+    assert_eq!(v4.as_list_ref().values[0].as_str(), "10.0.0.1");
+    assert_eq!(v4.as_list_ref().values[1].as_str(), "8080");
+    let v6 = cfg.dict_get_value("v6_pair").unwrap();
+    assert_eq!(v6.as_list_ref().values[0].as_str(), "::1");
+    assert_eq!(v6.as_list_ref().values[1].as_str(), "8080");
+    assert_eq!(
+        cfg.dict_get_value("v4_joined").unwrap().as_str(),
+        "10.0.0.1:8080"
+    );
+    assert_eq!(
+        cfg.dict_get_value("v6_joined").unwrap().as_str(),
+        "[::1]:8080"
+    );
+}
+
+/// F1.7 — upstream `import net` (the stringly-typed package) is
+/// gone; `mokkan.net` is the sole networking surface. Importing
+/// the dead path now surfaces a resolve-stage diagnostic. Locks
+/// down the deletion so a future regression doesn't quietly
+/// resurrect the upstream package.
+#[test]
+fn mokkan_upstream_net_import_path_is_dead() {
+    let ready = Embedded::new().build();
+    let err = ready
+        .evaluate(EvaluateArgs {
+            main_source: concat!(
+                "import net\n",
+                "\n",
+                "cfg = {\n",
+                "    fqdn = net.fqdn()\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        })
+        .expect_err("import net should fail post-F1.7");
+
+    let diags = match err {
+        EvaluationError::Resolve(d) | EvaluationError::Parse(d) => d,
+        other => panic!("expected Resolve/Parse, got: {other:?}"),
+    };
+    let messages: Vec<&str> = diags
+        .iter()
+        .flat_map(|d| d.messages.iter().map(|m| m.message.as_str()))
+        .collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("net") && m.contains("not found")),
+        "expected `pkgpath net not found` diagnostic; got: {messages:?}"
+    );
+}

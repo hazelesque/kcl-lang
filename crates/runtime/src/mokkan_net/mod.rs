@@ -540,3 +540,180 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_broadcast(
 
     ValueRef::from(Value::inet_value(result)).into_raw(ctx)
 }
+
+// F1.7: stringly-typed survivors from upstream KCL's `net` package.
+// Per F1.4.bis: the typed inet algebra surface above replaces the
+// CIDR_*/parse_*/is_*/IP_*/to_* upstream functions (operators write
+// `addr: inet = "1.2.3.4/24"` and the F1.3 string-coercion handles
+// it; predicates like `contains()` / `overlaps()` cover what
+// `is_IP_in_CIDR()` did). Three string-shaped utility functions
+// have no typed equivalent yet, so they survive under `mokkan.net`
+// with their existing signatures until a typed redesign emerges:
+//
+//   * `fqdn(name?: str) -> str` — DNS lookup; orthogonal to inet
+//     types entirely.
+//   * `split_host_port(ip_end_point: str) -> [str]` — parses
+//     `host:port` / `[v6]:port`; ports aren't a typed concept here.
+//   * `join_host_port(host, port: int | str) -> str` — inverse of
+//     the above.
+
+/// Mokkan `split_host_port(ip_end_point: str) -> [str]`. Survives
+/// from upstream KCL `net.split_host_port` (D6 / F1.4.bis); same
+/// stringly-typed signature, panic-on-malformed-input behaviour.
+/// Implementation copied verbatim from the old upstream surface.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn kcl_mokkan_net_split_host_port(
+    ctx: *mut kcl_context_t,
+    args: *const kcl_value_ref_t,
+    kwargs: *const kcl_value_ref_t,
+) -> *const kcl_value_ref_t {
+    let args = unsafe { ptr_as_ref(args) };
+    let kwargs = unsafe { ptr_as_ref(kwargs) };
+    let ctx = unsafe { mut_ptr_as_ref(ctx) };
+
+    if let Some(ip_end_point) = get_call_arg(args, kwargs, 0, Some("ip_end_point")) {
+        let ip_end_point_str = ip_end_point.as_str();
+        match ip_end_point_str.rsplit_once(':') {
+            None => panic!(
+                "ip_end_point \"{}\" missing port",
+                ip_end_point_str.escape_default()
+            ),
+            Some((host, port)) => {
+                if host.starts_with('[') {
+                    match ip_end_point_str.find(']') {
+                        None => panic!(
+                            "ip_end_point \"{}\" missing ']'",
+                            ip_end_point_str.escape_default()
+                        ),
+                        Some(end) => {
+                            if end > host.len() || !ip_end_point_str[end + 1..].starts_with(':') {
+                                panic!(
+                                    "ip_end_point \"{}\" missing port",
+                                    ip_end_point_str.escape_default()
+                                );
+                            }
+                            if end < host.len() - 1 {
+                                panic!(
+                                    "ip_end_point \"{}\" too many colons",
+                                    ip_end_point_str.escape_default()
+                                );
+                            }
+                            if ip_end_point_str[1..].contains('[') {
+                                panic!(
+                                    "ip_end_point \"{}\" unexpected '['",
+                                    ip_end_point_str.escape_default()
+                                );
+                            }
+                            if port.contains(']') {
+                                panic!(
+                                    "ip_end_point \"{}\" unexpected ']'",
+                                    ip_end_point_str.escape_default()
+                                );
+                            }
+                            return ValueRef::list(Some(&[
+                                &ValueRef::str(&host[1..end]),
+                                &ValueRef::str(port),
+                            ]))
+                            .into_raw(ctx);
+                        }
+                    }
+                }
+                if host.contains(':') {
+                    panic!(
+                        "ip_end_point \"{}\" too many colons",
+                        ip_end_point_str.escape_default()
+                    );
+                }
+                if ip_end_point_str[1..].contains('[') {
+                    panic!(
+                        "ip_end_point \"{}\" unexpected '['",
+                        ip_end_point_str.escape_default()
+                    );
+                }
+                if ip_end_point_str.contains(']') {
+                    panic!(
+                        "ip_end_point \"{}\" unexpected ']'",
+                        ip_end_point_str.escape_default()
+                    );
+                }
+                return ValueRef::list(Some(&[&ValueRef::str(host), &ValueRef::str(port)]))
+                    .into_raw(ctx);
+            }
+        }
+    }
+
+    panic!("split_host_port() missing 1 required positional argument: 'ip_end_point'");
+}
+
+/// Mokkan `join_host_port(host, port) -> str`. Inverse of
+/// `split_host_port`. Survives from upstream KCL with the same
+/// signature.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn kcl_mokkan_net_join_host_port(
+    ctx: *mut kcl_context_t,
+    args: *const kcl_value_ref_t,
+    kwargs: *const kcl_value_ref_t,
+) -> *const kcl_value_ref_t {
+    let args = unsafe { ptr_as_ref(args) };
+    let kwargs = unsafe { ptr_as_ref(kwargs) };
+    let ctx = unsafe { mut_ptr_as_ref(ctx) };
+
+    if let Some(host) = get_call_arg(args, kwargs, 0, Some("host"))
+        && let Some(port) = get_call_arg(args, kwargs, 1, Some("port"))
+    {
+        if host.as_str().contains(':') {
+            return ValueRef::str(format!("[{host}]:{port}").as_ref()).into_raw(ctx);
+        }
+        return ValueRef::str(format!("{host}:{port}").as_ref()).into_raw(ctx);
+    }
+    panic!("join_host_port() missing 2 required positional arguments: 'host' and 'port'");
+}
+
+/// Mokkan `fqdn(name?: str) -> str`. Survives from upstream KCL.
+/// DNS lookup; orthogonal to inet types. Native-target uses
+/// `hostname` + `dns_lookup`; wasm target panics (no syscalls).
+#[cfg(not(target_arch = "wasm32"))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn kcl_mokkan_net_fqdn(
+    ctx: *mut kcl_context_t,
+    args: *const kcl_value_ref_t,
+    kwargs: *const kcl_value_ref_t,
+) -> *const kcl_value_ref_t {
+    use std::net::ToSocketAddrs;
+    let ctx = unsafe { mut_ptr_as_ref(ctx) };
+    let args = unsafe { ptr_as_ref(args) };
+    let kwargs = unsafe { ptr_as_ref(kwargs) };
+    let name = get_call_arg_str(args, kwargs, 0, Some("name")).unwrap_or_default();
+    let hostname = if name.is_empty() {
+        match hostname::get() {
+            Ok(name) => name.to_string_lossy().into_owned(),
+            Err(_) => return ValueRef::str("").into_raw(ctx),
+        }
+    } else {
+        name
+    };
+    match (hostname.as_str(), 0).to_socket_addrs() {
+        Ok(mut addrs) => {
+            if let Some(addr) = addrs.next() {
+                match dns_lookup::lookup_addr(&addr.ip()) {
+                    Ok(fqdn) => ValueRef::str(&fqdn),
+                    Err(_) => ValueRef::str(&hostname),
+                }
+            } else {
+                ValueRef::str(&hostname)
+            }
+        }
+        Err(_) => ValueRef::str(&hostname),
+    }
+    .into_raw(ctx)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn kcl_mokkan_net_fqdn(
+    _ctx: *mut kcl_context_t,
+    _args: *const kcl_value_ref_t,
+    _kwargs: *const kcl_value_ref_t,
+) -> *const kcl_value_ref_t {
+    panic!("fqdn() does not support the WASM target");
+}

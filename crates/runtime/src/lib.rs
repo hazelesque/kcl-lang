@@ -88,8 +88,11 @@ pub use self::manifests::*;
 pub mod math;
 pub use self::math::*;
 
-pub mod net;
-pub use self::net::*;
+// F1.7: upstream KCL's stringly-typed `net` package was deleted —
+// mokkan.net (typed inet algebra) supersedes it. The three
+// non-CIDR survivors (`fqdn`, `split_host_port`, `join_host_port`)
+// were rehomed to `crates/runtime/src/mokkan_net/mod.rs` as
+// `kcl_mokkan_net_*` per F1.4.bis / D6.
 
 pub mod regex;
 pub use self::regex::*;

@@ -201,46 +201,27 @@ pub fn kcl_get_fn_ptr_by_name(name: &str) -> u64 {
         "kcl_mokkan_net_contains" => crate::kcl_mokkan_net_contains as *const () as u64,
         "kcl_mokkan_net_contains_eq" => crate::kcl_mokkan_net_contains_eq as *const () as u64,
         "kcl_mokkan_net_family" => crate::kcl_mokkan_net_family as *const () as u64,
+        "kcl_mokkan_net_fqdn" => crate::kcl_mokkan_net_fqdn as *const () as u64,
         "kcl_mokkan_net_host" => crate::kcl_mokkan_net_host as *const () as u64,
         "kcl_mokkan_net_hostmask" => crate::kcl_mokkan_net_hostmask as *const () as u64,
         "kcl_mokkan_net_inet_merge" => crate::kcl_mokkan_net_inet_merge as *const () as u64,
         "kcl_mokkan_net_inet_same_family" => {
             crate::kcl_mokkan_net_inet_same_family as *const () as u64
         }
+        "kcl_mokkan_net_join_host_port" => crate::kcl_mokkan_net_join_host_port as *const () as u64,
         "kcl_mokkan_net_masklen" => crate::kcl_mokkan_net_masklen as *const () as u64,
         "kcl_mokkan_net_netmask" => crate::kcl_mokkan_net_netmask as *const () as u64,
         "kcl_mokkan_net_network" => crate::kcl_mokkan_net_network as *const () as u64,
         "kcl_mokkan_net_overlaps" => crate::kcl_mokkan_net_overlaps as *const () as u64,
         "kcl_mokkan_net_set_masklen" => crate::kcl_mokkan_net_set_masklen as *const () as u64,
+        "kcl_mokkan_net_split_host_port" => {
+            crate::kcl_mokkan_net_split_host_port as *const () as u64
+        }
         "kcl_mokkan_net_text" => crate::kcl_mokkan_net_text as *const () as u64,
-        "kcl_net_CIDR_host" => crate::kcl_net_CIDR_host as *const () as u64,
-        "kcl_net_CIDR_netmask" => crate::kcl_net_CIDR_netmask as *const () as u64,
-        "kcl_net_CIDR_subnet" => crate::kcl_net_CIDR_subnet as *const () as u64,
-        "kcl_net_CIDR_subnets" => crate::kcl_net_CIDR_subnets as *const () as u64,
-        "kcl_net_IP_string" => crate::kcl_net_IP_string as *const () as u64,
-        "kcl_net_fqdn" => crate::kcl_net_fqdn as *const () as u64,
-        "kcl_net_is_IP" => crate::kcl_net_is_IP as *const () as u64,
-        "kcl_net_is_IP_in_CIDR" => crate::kcl_net_is_IP_in_CIDR as *const () as u64,
-        "kcl_net_is_IPv4" => crate::kcl_net_is_IPv4 as *const () as u64,
-        "kcl_net_is_global_unicast_IP" => crate::kcl_net_is_global_unicast_IP as *const () as u64,
-        "kcl_net_is_interface_local_multicast_IP" => {
-            crate::kcl_net_is_interface_local_multicast_IP as *const () as u64
-        }
-        "kcl_net_is_link_local_multicast_IP" => {
-            crate::kcl_net_is_link_local_multicast_IP as *const () as u64
-        }
-        "kcl_net_is_link_local_unicast_IP" => {
-            crate::kcl_net_is_link_local_unicast_IP as *const () as u64
-        }
-        "kcl_net_is_loopback_IP" => crate::kcl_net_is_loopback_IP as *const () as u64,
-        "kcl_net_is_multicast_IP" => crate::kcl_net_is_multicast_IP as *const () as u64,
-        "kcl_net_is_unspecified_IP" => crate::kcl_net_is_unspecified_IP as *const () as u64,
-        "kcl_net_join_host_port" => crate::kcl_net_join_host_port as *const () as u64,
-        "kcl_net_parse_CIDR" => crate::kcl_net_parse_CIDR as *const () as u64,
-        "kcl_net_parse_IP" => crate::kcl_net_parse_IP as *const () as u64,
-        "kcl_net_split_host_port" => crate::kcl_net_split_host_port as *const () as u64,
-        "kcl_net_to_IP4" => crate::kcl_net_to_IP4 as *const () as u64,
-        "kcl_net_to_IP6" => crate::kcl_net_to_IP6 as *const () as u64,
+        // F1.7: upstream `kcl_net_*` entries deleted — mokkan.net
+        // is the sole networking surface. The three surviving
+        // upstream functions (`fqdn`, `split_host_port`,
+        // `join_host_port`) are now in the mokkan_net group above.
         "kcl_plugin_init" => crate::kcl_plugin_init as *const () as u64,
         "kcl_plugin_invoke" => crate::kcl_plugin_invoke as *const () as u64,
         "kcl_plugin_invoke_json" => crate::kcl_plugin_invoke_json as *const () as u64,

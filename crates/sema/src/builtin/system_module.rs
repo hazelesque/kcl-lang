@@ -117,411 +117,6 @@ register_base32_member! {
 }
 
 // ------------------------------
-// net system package
-// ------------------------------
-
-pub const NET: &str = "net";
-macro_rules! register_net_member {
-    ($($name:ident => $ty:expr)*) => (
-        pub static NET_FUNCTION_TYPES: Lazy<IndexMap<String, Type>> = Lazy::new(|| {
-            let mut builtin_mapping = IndexMap::default();
-            $( builtin_mapping.insert(stringify!($name).to_string(), $ty); )*
-            builtin_mapping
-        });
-        pub const NET_FUNCTION_NAMES: &[&str] = &[
-            $( stringify!($name), )*
-        ];
-    )
-}
-register_net_member! {
-    CIDR_host => Type::function(
-        None,
-        Type::str_ref(),
-        &[
-            Parameter {
-                name: "cidr".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,default_value: None,
-                range: dummy_range(),
-            },
-            Parameter {
-                name: "host_num".to_string(),
-                ty: Type::int_ref(),
-                has_default: false,default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Calulate a host IP within an enclosing subnet."#,
-        false,
-        None,
-    )
-    CIDR_netmask => Type::function(
-        None,
-        Type::str_ref(),
-        &[
-            Parameter {
-                name: "cidr".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Calulate the netmask for a subnet."#,
-        false,
-        None,
-    )
-    CIDR_subnet => Type::function(
-        None,
-        Type::str_ref(),
-        &[
-            Parameter {
-                name: "cidr".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,default_value: None,
-                range: dummy_range(),
-            },
-            Parameter {
-                name: "additional_bits".to_string(),
-                ty: Type::int_ref(),
-                has_default: false,default_value: None,
-                range: dummy_range(),
-            },
-            Parameter {
-                name: "net_num".to_string(),
-                ty: Type::int_ref(),
-                has_default: false,default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Calulate a subnet within an enclosing subnet."#,
-        false,
-        None,
-    )
-    CIDR_subnets => Type::function(
-        None,
-        Type::list_ref(Type::str_ref()),
-        &[
-            Parameter {
-                name: "cidr".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,default_value: None,
-                range: dummy_range(),
-            },
-            Parameter {
-                name: "additional_bits".to_string(),
-                ty: Type::list_ref(Type::int_ref()),
-                has_default: false,default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Allocate subnets within an enclosing subnet."#,
-        false,
-        None,
-    )
-    split_host_port => Type::function(
-        None,
-        Type::list_ref(Type::str_ref()),
-        &[
-            Parameter {
-                name: "ip_end_point".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Split the `host` and `port` from the `ip_end_point`."#,
-        false,
-        None,
-    )
-    join_host_port => Type::function(
-        None,
-        Type::str_ref(),
-        &[
-            Parameter {
-                name: "host".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-            Parameter {
-                name: "port".to_string(),
-                ty: Type::union_ref(&[Type::int_ref(), Type::str_ref()]),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Merge the `host` and `port`."#,
-        false,
-        None,
-    )
-    fqdn => Type::function(
-        None,
-        Type::str_ref(),
-        &[
-            Parameter {
-                name: "name".to_string(),
-                ty: Type::str_ref(),
-                has_default: true,
-                default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Return Fully Qualified Domain Name (FQDN)."#,
-        false,
-        None,
-    )
-    parse_IP => Type::function(
-        None,
-        Type::str_ref(),
-        &[
-            Parameter {
-                name: "ip".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Parse ip to a real IP address."#,
-        false,
-        None,
-    )
-    IP_string => Type::function(
-        None,
-        Type::str_ref(),
-        &[
-            Parameter {
-                name: "ip".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Get the IP string."#,
-        false,
-        None,
-    )
-    to_IP4 => Type::function(
-        None,
-        Type::str_ref(),
-        &[
-            Parameter {
-                name: "ip".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Get the IP4 form of ip."#,
-        false,
-        None,
-    )
-    to_IP6 => Type::function(
-        None,
-        Type::str_ref(),
-        &[
-            Parameter {
-                name: "ip".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Get the IP6 form of ip."#,
-        false,
-        None,
-    )
-    is_IPv4 => Type::function(
-        None,
-        Type::bool_ref(),
-        &[
-            Parameter {
-                name: "ip".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Whether ip is a IPv4 one."#,
-        false,
-        None,
-    )
-    is_IP => Type::function(
-        None,
-        Type::bool_ref(),
-        &[
-            Parameter {
-                name: "ip".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Whether ip is a valid ip address."#,
-        false,
-        None,
-    )
-    is_loopback_IP => Type::function(
-        None,
-        Type::bool_ref(),
-        &[
-            Parameter {
-                name: "ip".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Whether ip is a loopback one."#,
-        false,
-        None,
-    )
-    is_multicast_IP => Type::function(
-        None,
-        Type::bool_ref(),
-        &[
-            Parameter {
-                name: "ip".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Whether ip is a multicast one."#,
-        false,
-        None,
-    )
-    is_interface_local_multicast_IP => Type::function(
-        None,
-        Type::bool_ref(),
-        &[
-            Parameter {
-                name: "ip".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Whether ip is a interface, local and multicast one."#,
-        false,
-        None,
-    )
-    is_link_local_multicast_IP => Type::function(
-        None,
-        Type::bool_ref(),
-        &[
-            Parameter {
-                name: "ip".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Whether ip is a link local and multicast one."#,
-        false,
-        None,
-    )
-    is_link_local_unicast_IP => Type::function(
-        None,
-        Type::bool_ref(),
-        &[
-            Parameter {
-                name: "ip".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Whether ip is a link local and unicast one."#,
-        false,
-        None,
-    )
-    is_global_unicast_IP => Type::function(
-        None,
-        Type::bool_ref(),
-        &[
-            Parameter {
-                name: "ip".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Whether ip is a global and unicast one."#,
-        false,
-        None,
-    )
-    is_unspecified_IP => Type::function(
-        None,
-        Type::bool_ref(),
-        &[
-            Parameter {
-                name: "ip".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Whether ip is a unspecified one."#,
-        false,
-        None,
-    )
-    parse_CIDR => Type::function(
-        None,
-        Type::dict_ref(Type::str_ref(), Type::any_ref()),
-        &[
-            Parameter {
-                name: "cidr".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Parse a CIDR prefix into a dict containing 'ip' (the IP) and 'mask' (the prefix bit length)."#,
-        false,
-        None,
-    )
-    is_IP_in_CIDR => Type::function(
-        None,
-        Type::bool_ref(),
-        &[
-            Parameter {
-                name: "ip".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-            Parameter {
-                name: "cidr".to_string(),
-                ty: Type::str_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-        ],
-        r#"Check if an IP address is within a given CIDR block."#,
-        false,
-        None,
-    )
-}
-
-// ------------------------------
 // manifests system package
 // ------------------------------
 
@@ -2568,17 +2163,73 @@ register_mokkan_net_member! {
         Type::bool_ref(),
         r#"`inet_same_family(inet, inet)`: both addresses share the same IP family."#,
     )
+    // F1.7: stringly-typed survivors from upstream KCL's deleted
+    // `net` package (per F1.4.bis). Same signatures and behaviour
+    // as upstream; available under `mokkan.net` until a typed
+    // redesign emerges. The other upstream functions (CIDR_*,
+    // parse_*, is_*, IP_string, to_IP4, to_IP6, is_IP_in_CIDR)
+    // are redundant with the typed surface and were removed.
+    fqdn => Type::function(
+        None,
+        Type::str_ref(),
+        &[Parameter {
+            name: "name".to_string(),
+            ty: Type::str_ref(),
+            has_default: true,
+            default_value: None,
+            range: dummy_range(),
+        }],
+        r#"Return Fully Qualified Domain Name (FQDN). Inherited from upstream KCL `net.fqdn` — DNS lookup, orthogonal to inet types."#,
+        false,
+        None,
+    )
+    split_host_port => Type::function(
+        None,
+        Type::list_ref(Type::str_ref()),
+        &[Parameter {
+            name: "ip_end_point".to_string(),
+            ty: Type::str_ref(),
+            has_default: false,
+            default_value: None,
+            range: dummy_range(),
+        }],
+        r#"Split `host` and `port` from `ip_end_point`. Handles `host:port` and `[v6]:port` forms."#,
+        false,
+        None,
+    )
+    join_host_port => Type::function(
+        None,
+        Type::str_ref(),
+        &[
+            Parameter {
+                name: "host".to_string(),
+                ty: Type::str_ref(),
+                has_default: false,
+                default_value: None,
+                range: dummy_range(),
+            },
+            Parameter {
+                name: "port".to_string(),
+                ty: Type::union_ref(&[Type::int_ref(), Type::str_ref()]),
+                has_default: false,
+                default_value: None,
+                range: dummy_range(),
+            },
+        ],
+        r#"Merge `host` and `port`. Brackets `host` if it contains `:` (v6 literal)."#,
+        false,
+        None,
+    )
 }
 
 pub const STANDARD_SYSTEM_MODULES: &[&str] = &[
-    COLLECTION, NET, MANIFESTS, MATH, DATETIME, REGEX, YAML, JSON, CRYPTO, BASE64, UNITS, FILE,
-    TEMPLATE, RUNTIME, BASE32, // F1.4: mokkan native packages.
+    COLLECTION, MANIFESTS, MATH, DATETIME, REGEX, YAML, JSON, CRYPTO, BASE64, UNITS, FILE,
+    TEMPLATE, RUNTIME, BASE32, // F1.4: mokkan native packages. F1.7 removed upstream `NET`.
     MOKKAN_NET,
 ];
 
 pub const STANDARD_SYSTEM_MODULE_NAMES_WITH_AT: &[&str] = &[
     "@collection",
-    "@net",
     "@manifests",
     "@math",
     "@datetime",
@@ -2592,6 +2243,8 @@ pub const STANDARD_SYSTEM_MODULE_NAMES_WITH_AT: &[&str] = &[
     "@template",
     "@runtime",
     "@base32",
+    // F1.7: upstream "@net" deleted; "@mokkan.net" is the
+    // typed-inet surface that supersedes it.
     "@mokkan.net",
 ];
 
@@ -2600,7 +2253,8 @@ pub fn get_system_module_members(name: &str) -> Vec<&str> {
     match name {
         BASE64 => BASE64_FUNCTION_NAMES.to_vec(),
         BASE32 => BASE32_FUNCTION_NAMES.to_vec(),
-        NET => NET_FUNCTION_NAMES.to_vec(),
+        // F1.7: upstream `NET` arm deleted; `mokkan.net` below
+        // is the sole networking surface.
         MANIFESTS => MANIFESTS_FUNCTION_NAMES.to_vec(),
         MATH => MATH_FUNCTION_NAMES.to_vec(),
         DATETIME => DATETIME_FUNCTION_NAMES.to_vec(),
@@ -2639,10 +2293,7 @@ pub fn get_system_member_function_ty(name: &str, func: &str) -> TypeRef {
             let types = &BASE32_FUNCTION_TYPES;
             types.get(func).cloned()
         }
-        NET => {
-            let types = &NET_FUNCTION_TYPES;
-            types.get(func).cloned()
-        }
+        // F1.7: upstream `NET` arm deleted; `mokkan.net` below.
         MANIFESTS => {
             let types = &MANIFESTS_FUNCTION_TYPES;
             types.get(func).cloned()
