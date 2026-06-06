@@ -59,6 +59,14 @@ use tracing::info_span;
 /// reasons in this crate's README before flipping.
 pub use kcl_error::Diagnostic;
 
+/// F2.7: deferred-resolution types. `Resolvable<T>` is the
+/// codegen-target type for schema fields declared as
+/// `T | ResolvableString`. Plus mirror re-exports of the
+/// runtime-side `Segment` / `Expr` / `ResolvableString` /
+/// `IpFamily` types so consumers don't need to depend on
+/// `kcl_runtime` directly for these.
+pub mod resolve;
+
 /// Render a slice of [`Diagnostic`]s as the pretty CLI-style text
 /// (source-marker arrows, line/column headers, etc.) that the KCL
 /// command-line tool produces when a program fails to parse, resolve,

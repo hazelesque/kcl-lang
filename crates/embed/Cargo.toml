@@ -26,6 +26,11 @@ kcl-parser.workspace = true
 kcl-runner.workspace = true
 kcl-runtime.workspace = true
 kcl-sema.workspace = true
+# F2.7a: kcl_embed::resolve's EagerValue carries typed inet values;
+# pin to the same workspace-level version as kcl-runtime / Tilley
+# so the cidr crate's IpCidr / IpInet types are identity-matched
+# across the public API surface.
+cidr = "0.3"
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
@@ -33,5 +38,4 @@ tracing-subscriber.workspace = true
 # / as_macaddr8 / as_ip_family ValueRef accessors against typed
 # values directly (the path the codegen-emitted TryFrom bodies
 # follow).
-cidr = "0.3"
 macaddr = "1.0"
