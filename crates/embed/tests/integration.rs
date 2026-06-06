@@ -1376,3 +1376,174 @@ fn mokkan_upstream_net_import_path_is_dead() {
         "expected `pkgpath net not found` diagnostic; got: {messages:?}"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────
+// F2.5 — `mokkan.net_symbolic` builtins (symbolic-value constructors).
+// ────────────────────────────────────────────────────────────────────
+
+/// `import mokkan.net_symbolic` and `net_symbolic.symbolic_subnet(...)`
+/// produce a symbolic cidr value at the runtime layer. The Display
+/// goes through the F2.1 `CidrValue` diagnostic format — operator-
+/// facing stringification flows through the F2.4 ResolvableString
+/// path instead.
+#[test]
+fn mokkan_net_symbolic_subnet_constructs_symbolic_cidr() {
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "import mokkan.net\n",
+                "import mokkan.net_symbolic\n",
+                "\n",
+                "schema NetCfg:\n",
+                "    s: cidr\n",
+                "\n",
+                // Operator-facing call: `symbolic_subnet(handle, size,
+                // family)` with family required (D6 "no v4 baked in
+                // forever").
+                "cfg = NetCfg {\n",
+                "    s = net_symbolic.symbolic_subnet(\"lan\", 24, net.V4)\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+    let s = cfg.dict_get_value("s").unwrap();
+    assert_eq!(s.type_str(), "cidr");
+    let disp = format!("{s}");
+    assert!(
+        disp.starts_with("<symbolic cidr: "),
+        "F2.1 diagnostic Display for symbolic cidr, got: {disp}"
+    );
+    // The IR snippet should mention the handle so the diagnostic
+    // points at the named network — locks in the debug shape so a
+    // regression that loses the handle is caught here.
+    assert!(
+        disp.contains("\"lan\""),
+        "diagnostic should name the handle, got: {disp}"
+    );
+}
+
+/// `net_symbolic.symbolic_inet(handle, offset)` produces a symbolic
+/// inet that downstream algebra (broadcast / + / -) composes via F2.2
+/// dispatch. The IR shape is
+/// `AddOffset(NetworkOf(HandleSubnet{None,None}), LiteralInt(offset))`
+/// per D3 — no size or family on the leaf because the operator
+/// asserted neither at the call site.
+#[test]
+fn mokkan_net_symbolic_inet_constructs_with_addoffset_networkof_handle() {
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "import mokkan.net_symbolic\n",
+                "\n",
+                "schema NetCfg:\n",
+                "    a: inet\n",
+                "\n",
+                "cfg = NetCfg {\n",
+                "    a = net_symbolic.symbolic_inet(\"lan\", 10)\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+    let a = cfg.dict_get_value("a").unwrap();
+    assert_eq!(a.type_str(), "inet");
+    let disp = format!("{a}");
+    assert!(
+        disp.starts_with("<symbolic inet: "),
+        "F2.1 diagnostic Display for symbolic inet, got: {disp}"
+    );
+    // Lock in shape: AddOffset wrapping NetworkOf wrapping
+    // HandleSubnet. Each Expr variant name should appear in the
+    // debug-shaped diagnostic.
+    for needle in ["AddOffset", "NetworkOf", "HandleSubnet", "\"lan\""] {
+        assert!(
+            disp.contains(needle),
+            "expected {needle:?} in IR debug, got: {disp}"
+        );
+    }
+}
+
+/// F2.2 round-trip via F2.5: feed a symbolic inet through
+/// `net.broadcast` and check the result is also symbolic, wrapping
+/// `BroadcastOf` over the source. This is the first end-to-end
+/// exercise of the symbolic-dispatch path through the runtime — the
+/// F2.2 unit tests in val_bin.rs covered the operator overloads at
+/// the Rust API level; this covers the C-ABI builtin dispatch.
+#[test]
+fn symbolic_inet_then_net_broadcast_wraps_in_broadcastof() {
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "import mokkan.net\n",
+                "import mokkan.net_symbolic\n",
+                "\n",
+                "schema NetCfg:\n",
+                "    b: inet\n",
+                "\n",
+                // `symbolic_inet("lan", 0)` returns inet (the network's
+                // base address), which net.broadcast accepts directly.
+                // symbolic_subnet returns cidr and would need a
+                // cidr→inet coercion step we don't have.
+                "cfg = NetCfg {\n",
+                "    b = net.broadcast(net_symbolic.symbolic_inet(\"lan\", 0))\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+    let b = cfg.dict_get_value("b").unwrap();
+    assert_eq!(b.type_str(), "inet");
+    let disp = format!("{b}");
+    assert!(
+        disp.contains("BroadcastOf") && disp.contains("HandleSubnet") && disp.contains("\"lan\""),
+        "expected BroadcastOf(... HandleSubnet(\"lan\", ...)) in IR debug, got: {disp}"
+    );
+}
+
+/// Sema enforces the `family` argument's IpFamily type at
+/// resolve-time — passing a string would fail with a type error
+/// before the runtime sees it. Locks in the D6 "no v4 baked in
+/// forever" rule: family is structurally required.
+#[test]
+fn symbolic_subnet_rejects_string_family_at_resolve_time() {
+    let ready = Embedded::new().build();
+    let err = ready
+        .evaluate(EvaluateArgs {
+            main_source: concat!(
+                "import mokkan.net_symbolic\n",
+                "\n",
+                "schema NetCfg:\n",
+                "    s: cidr\n",
+                "\n",
+                "cfg = NetCfg {\n",
+                "    s = net_symbolic.symbolic_subnet(\"lan\", 24, \"V4\")\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        })
+        .expect_err("string family should fail type check");
+    // Any of Resolve/Evaluate is acceptable — the exact stage may
+    // shift as sema/evaluator coverage tightens; what matters is
+    // that a string in the family slot doesn't silently work.
+    match err {
+        EvaluationError::Resolve(_) | EvaluationError::Evaluate(_) => {}
+        other => panic!("expected Resolve/Evaluate error, got: {other:?}"),
+    }
+}

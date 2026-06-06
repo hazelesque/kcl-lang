@@ -2245,10 +2245,114 @@ register_mokkan_net_member! {
     )
 }
 
+// ------------------------------
+// mokkan.net_symbolic system package (F2.5)
+// ------------------------------
+//
+// Symbolic-primitive constructors per D6:
+//
+//   - `symbolic_subnet(handle: str, size: int, family: IpFamily) -> cidr`
+//     — family REQUIRED (per D6 / Hazel's "no v4 baked in
+//       forever" rule). Resolver validates against the network's
+//       declaration at resolve time.
+//   - `symbolic_inet(handle: str, offset: int) -> inet`
+//     — no family / size parameters; the attachment inherits both
+//       from the handle's network declaration. Composition is
+//       `AddOffset(NetworkOf(HandleSubnet{None,None}), LiteralInt(offset))`.
+//
+// The package is at `mokkan.net_symbolic` (not `mokkan.symbolic`);
+// `mokkan.symbolic` is reserved for generic deferred-value
+// primitives per D6.
+
+pub const MOKKAN_NET_SYMBOLIC: &str = "mokkan.net_symbolic";
+
+macro_rules! register_mokkan_net_symbolic_member {
+    ($($name:ident => $ty:expr)*) => (
+        pub static MOKKAN_NET_SYMBOLIC_FUNCTION_TYPES: Lazy<IndexMap<String, Type>> = Lazy::new(|| {
+            let mut builtin_mapping = IndexMap::default();
+            $( builtin_mapping.insert(stringify!($name).to_string(), $ty); )*
+            builtin_mapping
+        });
+        pub const MOKKAN_NET_SYMBOLIC_FUNCTION_NAMES: &[&str] = &[
+            $( stringify!($name), )*
+        ];
+    )
+}
+
+register_mokkan_net_symbolic_member! {
+    symbolic_subnet => Type::function(
+        None,
+        Type::cidr_ref(),
+        &[
+            Parameter {
+                name: "handle".to_string(),
+                ty: Type::str_ref(),
+                has_default: false,
+                default_value: None,
+                range: dummy_range(),
+            },
+            Parameter {
+                name: "size".to_string(),
+                ty: Type::int_ref(),
+                has_default: false,
+                default_value: None,
+                range: dummy_range(),
+            },
+            Parameter {
+                name: "family".to_string(),
+                ty: Type::ip_family_ref(),
+                has_default: false,
+                default_value: None,
+                range: dummy_range(),
+            },
+        ],
+        r#"Construct a symbolic cidr referring to a named handle. Family is required (no v4 baked in forever); the resolver validates size and family against the handle's network declaration."#,
+        false,
+        None,
+    )
+    symbolic_inet => Type::function(
+        None,
+        Type::inet_ref(),
+        &[
+            Parameter {
+                name: "handle".to_string(),
+                ty: Type::str_ref(),
+                has_default: false,
+                default_value: None,
+                range: dummy_range(),
+            },
+            Parameter {
+                name: "offset".to_string(),
+                ty: Type::int_ref(),
+                has_default: false,
+                default_value: None,
+                range: dummy_range(),
+            },
+        ],
+        r#"Construct a symbolic inet at `offset` within the handle's network. Family and size are inherited from the network's declaration; the resolver looks them up without validation."#,
+        false,
+        None,
+    )
+}
+
 pub const STANDARD_SYSTEM_MODULES: &[&str] = &[
-    COLLECTION, MANIFESTS, MATH, DATETIME, REGEX, YAML, JSON, CRYPTO, BASE64, UNITS, FILE,
-    TEMPLATE, RUNTIME, BASE32, // F1.4: mokkan native packages. F1.7 removed upstream `NET`.
+    COLLECTION,
+    MANIFESTS,
+    MATH,
+    DATETIME,
+    REGEX,
+    YAML,
+    JSON,
+    CRYPTO,
+    BASE64,
+    UNITS,
+    FILE,
+    TEMPLATE,
+    RUNTIME,
+    BASE32,
+    // F1.4 / F2.5: mokkan native packages. F1.7 removed upstream `NET`.
     MOKKAN_NET,
+    MOKKAN_NET_SYMBOLIC,
 ];
 
 pub const STANDARD_SYSTEM_MODULE_NAMES_WITH_AT: &[&str] = &[
@@ -2269,6 +2373,8 @@ pub const STANDARD_SYSTEM_MODULE_NAMES_WITH_AT: &[&str] = &[
     // F1.7: upstream "@net" deleted; "@mokkan.net" is the
     // typed-inet surface that supersedes it.
     "@mokkan.net",
+    // F2.5: symbolic-primitive constructors.
+    "@mokkan.net_symbolic",
 ];
 
 /// Get the system module members
@@ -2301,6 +2407,12 @@ pub fn get_system_module_members(name: &str) -> Vec<&str> {
             members.append(&mut MOKKAN_NET_FIELD_NAMES.to_vec());
             members
         }
+        // F2.5: mokkan.net_symbolic — functions only, no field
+        // constants. Symbolic IpFamily constants are unnecessary;
+        // operators pass `net.V4` / `net.V6` (the resolved-typed
+        // constants from `mokkan.net`) as the `family` argument to
+        // `symbolic_subnet`.
+        MOKKAN_NET_SYMBOLIC => MOKKAN_NET_SYMBOLIC_FUNCTION_NAMES.to_vec(),
         _ => bug!("invalid system module name '{}'", name),
     }
 }
@@ -2368,6 +2480,11 @@ pub fn get_system_member_function_ty(name: &str, func: &str) -> TypeRef {
         // F1.4: typed inet algebra signatures.
         MOKKAN_NET => {
             let types = &MOKKAN_NET_FUNCTION_TYPES;
+            types.get(func).cloned()
+        }
+        // F2.5: symbolic-primitive signatures.
+        MOKKAN_NET_SYMBOLIC => {
+            let types = &MOKKAN_NET_SYMBOLIC_FUNCTION_TYPES;
             types.get(func).cloned()
         }
         _ => None,

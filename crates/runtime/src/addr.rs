@@ -221,6 +221,13 @@ pub fn kcl_get_fn_ptr_by_name(name: &str) -> u64 {
         "kcl_mokkan_net_split_host_port" => {
             crate::kcl_mokkan_net_split_host_port as *const () as u64
         }
+        // F2.5: mokkan.net_symbolic builtins.
+        "kcl_mokkan_net_symbolic_symbolic_inet" => {
+            crate::kcl_mokkan_net_symbolic_symbolic_inet as *const () as u64
+        }
+        "kcl_mokkan_net_symbolic_symbolic_subnet" => {
+            crate::kcl_mokkan_net_symbolic_symbolic_subnet as *const () as u64
+        }
         "kcl_mokkan_net_text" => crate::kcl_mokkan_net_text as *const () as u64,
         // F1.7: upstream `kcl_net_*` entries deleted — mokkan.net
         // is the sole networking surface. The three surviving

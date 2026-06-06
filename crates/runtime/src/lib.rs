@@ -122,6 +122,13 @@ pub use self::addr::*;
 pub mod mokkan_net;
 pub use self::mokkan_net::*;
 
+// F2.5: mokkan symbolic primitives — `net_symbolic.symbolic_subnet` /
+// `net_symbolic.symbolic_inet`. Separate package from `mokkan.net`
+// because symbolic mode is a spec extension on top of the typed
+// types, not a property of the types themselves (per D6).
+pub mod mokkan_net_symbolic;
+pub use self::mokkan_net_symbolic::*;
+
 #[derive(Debug, Default, Clone)]
 pub struct RuntimePanicRecord {
     pub kcl_panic_info: bool,
