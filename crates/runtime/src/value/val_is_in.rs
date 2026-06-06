@@ -82,6 +82,16 @@ impl ValueRef {
         matches!(&*self.rc.borrow(), Value::ip_family_value(_))
     }
 
+    /// F2.3: predicate for the deferred-string carrier. Distinct
+    /// from `is_str` — a `ResolvableString` is structurally a list
+    /// of segments, not a single resolved string. Schema fields
+    /// declared as `str` reject this value (per the F2.6
+    /// `T | ResolvableString` discipline).
+    #[inline]
+    pub fn is_resolvable_string(&self) -> bool {
+        matches!(&*self.rc.borrow(), Value::resolvable_string_value(_))
+    }
+
     #[inline]
     pub fn is_number(&self) -> bool {
         matches!(
@@ -109,6 +119,13 @@ impl ValueRef {
                 | Value::macaddr_value(_)
                 | Value::macaddr8_value(_)
                 | Value::ip_family_value(_)
+                // F2.3: ResolvableString is primitive-shaped (single
+                // payload, not a collection). is_builtin lets a field
+                // declared `ResolvableString` accept the value at
+                // schema-validation time via the same
+                // `value.is_builtin() && value.type_str() == tpe`
+                // path the other mokkan types use.
+                | Value::resolvable_string_value(_)
         )
     }
 

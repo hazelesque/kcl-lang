@@ -1032,6 +1032,12 @@ impl fmt::Display for ValueRef {
             Value::macaddr_value(v) => write!(f, "{v}"),
             Value::macaddr8_value(v) => write!(f, "{v}"),
             Value::ip_family_value(v) => write!(f, "{v}"),
+            // F2.3: Display falls through to ResolvableString's own
+            // impl — concatenated Literal segments with Symbolic
+            // segments as `${<expr-debug>}`. Diagnostic shape; the
+            // operator-facing resolved string flows through the
+            // resolver pass, not this.
+            Value::resolvable_string_value(v) => write!(f, "{v}"),
         }
     }
 }

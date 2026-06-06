@@ -180,6 +180,11 @@ impl Hash for ValueRef {
             Value::macaddr_value(v) => v.as_bytes().hash(state),
             Value::macaddr8_value(v) => v.as_bytes().hash(state),
             Value::ip_family_value(v) => v.hash(state),
+            // F2.3: deferred-string value. Hash via the underlying
+            // Segment list (derives Hash via Expr's derived Hash);
+            // consistent with PartialEq because both fall through to
+            // the same derived impls.
+            Value::resolvable_string_value(v) => v.hash(state),
         }
     }
 }
@@ -241,6 +246,13 @@ pub enum Value {
     macaddr_value(macaddr::MacAddr6),
     macaddr8_value(macaddr::MacAddr8),
     ip_family_value(crate::value::IpFamily),
+    // F2.3: deferred-string value carrier. Produced (in F2.4) by
+    // stringification (`text` / `host` / `abbrev` / `masklen`) on
+    // symbolic operands, and by string concatenation where any
+    // operand is itself a `ResolvableString`. Box because the
+    // segment list owns recursive Expr trees inside any
+    // `Segment::Symbolic` entries.
+    resolvable_string_value(Box<crate::value::ResolvableString>),
 }
 
 #[derive(PartialEq, Eq, Clone, Default, Debug)]
@@ -468,6 +480,12 @@ pub enum Kind {
     Inet = 19,    // covers both cidr_value and inet_value
     MacAddr = 20, // covers macaddr_value and macaddr8_value
     IpFamily = 21,
+    // F2.3: deferred-string value. Not currently exposed across
+    // the C ABI (mokkan codegen consumes it via the typed
+    // `Resolvable<T>` shape in F2.7, not via Kind dispatch), but
+    // the kind() method still needs to return something for the
+    // variant, so we reserve a discriminant.
+    ResolvableString = 22,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Default)]

@@ -27,6 +27,13 @@ impl ValueRef {
             Value::macaddr_value(_) => true,
             Value::macaddr8_value(_) => true,
             Value::ip_family_value(_) => true,
+            // F2.3: truthy by "is there any segment". Empty segment
+            // list is falsy (matches str's "empty is falsy" rule);
+            // any non-empty segment list — even purely-symbolic that
+            // would resolve to non-empty — is truthy. The truthiness
+            // check is consulted by KCL evaluation before resolution
+            // so we can't peek inside symbolic segments.
+            Value::resolvable_string_value(v) => !v.segments.is_empty(),
         }
     }
 
@@ -101,5 +108,33 @@ mod test_value_logic {
             let result = left.logic_or(&right);
             assert_eq!(result, expected);
         }
+    }
+
+    // F2.3: ResolvableString truthiness — empty segment list is falsy
+    // (matches str's empty-is-falsy rule), any non-empty list is
+    // truthy (we can't peek inside symbolic segments at runtime).
+    #[test]
+    fn test_resolvable_string_truthiness() {
+        let empty = ValueRef::from(Value::resolvable_string_value(
+            crate::value::ResolvableString::new(),
+        ));
+        assert!(!empty.is_truthy(), "empty ResolvableString is falsy");
+
+        let lit = ValueRef::from(Value::resolvable_string_value(
+            crate::value::ResolvableString::from_literal("hello"),
+        ));
+        assert!(lit.is_truthy(), "literal-only ResolvableString is truthy");
+
+        let sym = ValueRef::from(Value::resolvable_string_value(
+            crate::value::ResolvableString::from_symbolic(crate::value::Expr::HandleSubnet {
+                handle: "lan".to_string(),
+                size: Some(24),
+                family: Some(crate::value::IpFamily::V4),
+            }),
+        ));
+        assert!(
+            sym.is_truthy(),
+            "symbolic-segment ResolvableString is truthy"
+        );
     }
 }

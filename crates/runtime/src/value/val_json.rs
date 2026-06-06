@@ -559,6 +559,15 @@ impl ValueRef {
             crate::Value::macaddr_value(v) => JsonValue::String(v.to_string()),
             crate::Value::macaddr8_value(v) => JsonValue::String(v.to_string()),
             crate::Value::ip_family_value(v) => JsonValue::String(v.to_string()),
+            // F2.3: a ResolvableString in eager JSON output is a
+            // diagnostic-only encoding — the Display impl
+            // concatenates literal segments and renders symbolic
+            // segments as `${<expr-debug>}`. The operator-facing
+            // resolved value flows through the resolver (T4) before
+            // anything reaches JSON serialisation on the consumer
+            // side; if a ResolvableString appears in JSON output
+            // pre-resolution, it's a debug dump.
+            crate::Value::resolvable_string_value(v) => JsonValue::String(v.to_string()),
         }
     }
 }

@@ -82,6 +82,12 @@ impl ValueRef {
             Value::ip_family_value(v) => ValueRef {
                 rc: Rc::new(RefCell::new(Value::ip_family_value(*v))),
             },
+            // F2.3: Box<ResolvableString> clones the segment list +
+            // every nested Expr inside Symbolic segments. Cheap
+            // enough for typical sizes — segment counts are small.
+            Value::resolvable_string_value(v) => ValueRef {
+                rc: Rc::new(RefCell::new(Value::resolvable_string_value(v.clone()))),
+            },
             Value::schema_value(v) => {
                 let mut dict = ValueRef::from(Value::dict_value(Box::new(DictValue::new(&[]))));
                 dict.set_potential_schema_type(

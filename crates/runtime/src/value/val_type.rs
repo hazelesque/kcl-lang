@@ -44,6 +44,9 @@ pub const MOKKAN_TYPE_INET: &str = "inet";
 pub const MOKKAN_TYPE_MACADDR: &str = "macaddr";
 pub const MOKKAN_TYPE_MACADDR8: &str = "macaddr8";
 pub const MOKKAN_TYPE_IP_FAMILY: &str = "IpFamily";
+// F2.3: ResolvableString type name. Used in schema field declarations
+// as `T | ResolvableString` (F2.6 sema registration).
+pub const MOKKAN_TYPE_RESOLVABLE_STRING: &str = "ResolvableString";
 pub const NUMBER_MULTIPLIER_REGEX: &str =
     r"^([1-9][0-9]{0,63})(E|P|T|G|M|K|k|m|u|n|Ei|Pi|Ti|Gi|Mi|Ki)$";
 
@@ -132,6 +135,7 @@ impl ValueRef {
             Value::macaddr_value(..) => String::from(MOKKAN_TYPE_MACADDR),
             Value::macaddr8_value(..) => String::from(MOKKAN_TYPE_MACADDR8),
             Value::ip_family_value(..) => String::from(MOKKAN_TYPE_IP_FAMILY),
+            Value::resolvable_string_value(..) => String::from(MOKKAN_TYPE_RESOLVABLE_STRING),
         }
     }
 }
@@ -1116,5 +1120,24 @@ mod test_value_type {
         for (value, expected) in cases {
             assert_eq!(dereference_type(value), expected);
         }
+    }
+
+    /// F2.3: ValueRef-level glue for `resolvable_string_value` —
+    /// type_str / kind / is_resolvable_string / is_builtin all
+    /// resolve consistently. Catches a ripple-through regression
+    /// (forget one match arm = compile error today, but this also
+    /// pins runtime behaviour).
+    #[test]
+    fn resolvable_string_value_ref_glue() {
+        let rs = crate::value::ResolvableString::from_literal("hello");
+        let v = ValueRef::from(Value::resolvable_string_value(rs));
+        assert_eq!(v.type_str(), MOKKAN_TYPE_RESOLVABLE_STRING);
+        assert_eq!(v.kind(), Kind::ResolvableString);
+        assert!(v.is_resolvable_string());
+        assert!(!v.is_str());
+        // is_builtin includes ResolvableString so a field declared
+        // `ResolvableString` accepts the value via the standard
+        // match_builtin_type path (F2.6 plumbing).
+        assert!(v.is_builtin());
     }
 }

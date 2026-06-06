@@ -385,6 +385,128 @@ impl From<cidr::IpInet> for Box<InetValue> {
     }
 }
 
+// ============================================================================
+// F2.3: ResolvableString — deferred-string value carrier.
+// ============================================================================
+//
+// `ResolvableString` is the value-level container for stringification
+// of symbolic values. F2.4 will use it as the result of `text()` /
+// `host()` / `abbrev()` / `masklen()` (stringified) on symbolic
+// inputs, and as the result of string concatenation when either
+// operand is itself a symbolic-derived stringification.
+//
+// The shape is a flat segment list — each segment is either a
+// resolved string fragment (`Literal`) or a deferred symbolic
+// expression that the resolver will substitute at resolve time
+// (`Symbolic`). Empty segment list = empty resolved string. A
+// single-`Literal` list = an eagerly-resolvable string (same
+// downstream behaviour as a bare `str_value`); the segment
+// representation just keeps the type uniform.
+//
+// Generic name (`ResolvableString`, not `ResolvableInetString`) is
+// honest per plan: although today only inet-shaped operations
+// produce one, the type doesn't lock that in. Any future
+// symbolic-derived stringification (`mokkan.symbolic` direct
+// constructors, secret-management deferral, monorepo-config
+// cross-references) gets the same carrier.
+//
+// F2.3 ships only the type shape + value variant. F2.4 wires the
+// stringification / concat dispatch.
+
+/// One segment of a `ResolvableString`. Either a resolved string
+/// fragment or a deferred symbolic expression carrying an `Expr` IR
+/// for later resolution.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Segment {
+    /// Resolved string fragment, used verbatim at resolution time.
+    Literal(String),
+    /// Symbolic IR tree. The resolver evaluates this and stringifies
+    /// the result. Box keeps the Segment enum's discriminant size
+    /// manageable — Expr is recursive.
+    Symbolic(Box<Expr>),
+}
+
+/// Value-level container for a deferred string. See module-level
+/// docs for the shape rationale.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ResolvableString {
+    pub segments: Vec<Segment>,
+}
+
+impl ResolvableString {
+    /// Construct an empty `ResolvableString`. Equivalent to the empty
+    /// resolved string after resolution.
+    pub fn new() -> Box<Self> {
+        Box::new(ResolvableString {
+            segments: Vec::new(),
+        })
+    }
+
+    /// Construct a `ResolvableString` from a single resolved
+    /// fragment. Equivalent to a bare `str_value` after resolution
+    /// but keeps the type uniform with the symbolic-flow case.
+    pub fn from_literal(s: impl Into<String>) -> Box<Self> {
+        Box::new(ResolvableString {
+            segments: vec![Segment::Literal(s.into())],
+        })
+    }
+
+    /// Construct a `ResolvableString` from a single symbolic
+    /// expression. Used by F2.4's stringification dispatch on
+    /// symbolic operands (`text(symbolic_inet)` etc.).
+    pub fn from_symbolic(expr: Expr) -> Box<Self> {
+        Box::new(ResolvableString {
+            segments: vec![Segment::Symbolic(Box::new(expr))],
+        })
+    }
+
+    /// Construct from a pre-built segment list.
+    pub fn from_segments(segments: Vec<Segment>) -> Box<Self> {
+        Box::new(ResolvableString { segments })
+    }
+
+    /// Whether every segment is `Literal` — the value is eagerly
+    /// resolvable without consulting the resolver. Empty segment list
+    /// is trivially "fully literal".
+    pub fn is_fully_literal(&self) -> bool {
+        self.segments
+            .iter()
+            .all(|s| matches!(s, Segment::Literal(_)))
+    }
+
+    /// Whether any segment is `Symbolic` — the value requires
+    /// resolution before consumption.
+    pub fn has_symbolic(&self) -> bool {
+        self.segments
+            .iter()
+            .any(|s| matches!(s, Segment::Symbolic(_)))
+    }
+}
+
+impl Default for ResolvableString {
+    fn default() -> Self {
+        ResolvableString {
+            segments: Vec::new(),
+        }
+    }
+}
+
+impl std::fmt::Display for ResolvableString {
+    /// Canonical text form: concatenated Literal segments, with
+    /// Symbolic segments rendered as `${<expr-debug>}`. This is for
+    /// diagnostics — the operator-facing resolved string flows
+    /// through the resolver pass (F2.4/T4), not this Display impl.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for seg in &self.segments {
+            match seg {
+                Segment::Literal(s) => f.write_str(s)?,
+                Segment::Symbolic(e) => write!(f, "${{{e:?}}}")?,
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,5 +598,93 @@ mod tests {
         s.insert(a);
         s.insert(b);
         assert_eq!(s.len(), 1);
+    }
+
+    // F2.3: ResolvableString shape tests.
+    // ────────────────────────────────────────────────────────────
+
+    const LITERAL_PREFIX: &str = "host-";
+    const LITERAL_SUFFIX: &str = "-fin";
+
+    #[test]
+    fn resolvable_string_empty_is_fully_literal_and_no_symbolic() {
+        let rs = ResolvableString::new();
+        assert!(rs.is_fully_literal(), "empty list is trivially literal");
+        assert!(!rs.has_symbolic(), "empty list carries no symbolic");
+        assert_eq!(format!("{rs}"), "", "Display of empty is empty string");
+    }
+
+    #[test]
+    fn resolvable_string_from_literal_is_fully_literal() {
+        let rs = ResolvableString::from_literal(LITERAL_PREFIX);
+        assert!(rs.is_fully_literal());
+        assert!(!rs.has_symbolic());
+        assert_eq!(format!("{rs}"), LITERAL_PREFIX);
+    }
+
+    #[test]
+    fn resolvable_string_from_symbolic_has_symbolic_not_literal() {
+        let e = Expr::HandleSubnet {
+            handle: HANDLE.to_string(),
+            size: Some(24),
+            family: Some(IpFamily::V4),
+        };
+        let rs = ResolvableString::from_symbolic(e);
+        assert!(!rs.is_fully_literal());
+        assert!(rs.has_symbolic());
+        let display = format!("{rs}");
+        assert!(
+            display.starts_with("${") && display.ends_with("}"),
+            "symbolic Display should wrap in ${{...}}, got: {display}"
+        );
+    }
+
+    /// Multi-segment "prefix-${handle}-suffix" shape — the canonical
+    /// concat target. Display concatenates literals around the
+    /// debug-shaped symbolic placeholder.
+    #[test]
+    fn resolvable_string_multi_segment_concat_display() {
+        let e = Expr::HandleSubnet {
+            handle: HANDLE.to_string(),
+            size: Some(24),
+            family: Some(IpFamily::V4),
+        };
+        let rs = ResolvableString::from_segments(vec![
+            Segment::Literal(LITERAL_PREFIX.to_string()),
+            Segment::Symbolic(Box::new(e)),
+            Segment::Literal(LITERAL_SUFFIX.to_string()),
+        ]);
+        assert!(!rs.is_fully_literal());
+        assert!(rs.has_symbolic());
+        let display = format!("{rs}");
+        assert!(
+            display.starts_with(LITERAL_PREFIX) && display.ends_with(LITERAL_SUFFIX),
+            "literal fragments should bracket the symbolic placeholder, got: {display}"
+        );
+    }
+
+    /// ResolvableString derives Eq + Hash — both used by F2.7
+    /// codegen-side dedup and resolver caches.
+    #[test]
+    fn resolvable_string_round_trips_through_clone_and_eq() {
+        let e = Expr::HandleSubnet {
+            handle: HANDLE.to_string(),
+            size: Some(24),
+            family: Some(IpFamily::V4),
+        };
+        let a = *ResolvableString::from_segments(vec![
+            Segment::Literal(LITERAL_PREFIX.to_string()),
+            Segment::Symbolic(Box::new(e)),
+        ]);
+        let b = a.clone();
+        assert_eq!(a, b);
+        let mut s = std::collections::HashSet::new();
+        s.insert(a);
+        s.insert(b);
+        assert_eq!(
+            s.len(),
+            1,
+            "HashSet should dedup identical resolvable strings"
+        );
     }
 }
