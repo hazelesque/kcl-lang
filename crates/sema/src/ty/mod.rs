@@ -92,6 +92,8 @@ impl Type {
             TypeKind::Macaddr => MACADDR_TYPE_STR.to_string(),
             TypeKind::Macaddr8 => MACADDR8_TYPE_STR.to_string(),
             TypeKind::IpFamily => IP_FAMILY_TYPE_STR.to_string(),
+            // F2.6: mokkan deferred-string carrier type.
+            TypeKind::ResolvableString => RESOLVABLE_STRING_TYPE_STR.to_string(),
         }
     }
 
@@ -197,6 +199,11 @@ pub enum TypeKind {
     /// (NetworkDefinition.family, symbolic_subnet signature,
     /// resolver validation). Written as `IpFamily`.
     IpFamily,
+    /// Mokkan (F2.6): deferred-string value carrier. Schemas declare
+    /// `field: T | ResolvableString` to opt into accepting symbolic
+    /// values that the resolver will substitute at resolve time.
+    /// Written as `ResolvableString`.
+    ResolvableString,
 }
 
 bitflags::bitflags! {
@@ -226,6 +233,8 @@ bitflags::bitflags! {
         const MACADDR = 1 << 18;
         const MACADDR8 = 1 << 19;
         const IP_FAMILY = 1 << 20;
+        // F2.6: mokkan deferred-string carrier type.
+        const RESOLVABLE_STRING = 1 << 21;
     }
 }
 

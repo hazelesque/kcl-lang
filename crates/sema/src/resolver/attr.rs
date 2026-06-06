@@ -56,7 +56,11 @@ impl<'ctx> Resolver<'_> {
             | TypeKind::Inet
             | TypeKind::Macaddr
             | TypeKind::Macaddr8
-            | TypeKind::IpFamily => (false, self.any_ty()),
+            | TypeKind::IpFamily
+            // F2.6: ResolvableString is value-shaped, not attribute-
+            // shaped — its `segments` field is internal-only
+            // (consumed by codegen + resolver, not by KCL source).
+            | TypeKind::ResolvableString => (false, self.any_ty()),
             TypeKind::Str | TypeKind::StrLit(_) => match STRING_MEMBER_FUNCTIONS.get(attr) {
                 Some(ty) => (true, Arc::new(ty.clone())),
                 None => (false, self.any_ty()),

@@ -31,6 +31,11 @@ pub const INET_TYPE_STR: &str = "inet";
 pub const MACADDR_TYPE_STR: &str = "macaddr";
 pub const MACADDR8_TYPE_STR: &str = "macaddr8";
 pub const IP_FAMILY_TYPE_STR: &str = "IpFamily";
+// F2.6: deferred-string carrier. Schemas declare
+// `field: T | ResolvableString` to opt into symbolic-flow
+// acceptance. PascalCase to match how operator-facing builtin
+// types like `IpFamily` are spelled.
+pub const RESOLVABLE_STRING_TYPE_STR: &str = "ResolvableString";
 
 pub const ITERABLE_TYPE_STR: &str = "str|{:}|[]";
 pub const NUMBER_TYPE_STR: &str = "int|float|bool";
@@ -74,6 +79,10 @@ pub static TYPES_MAPPING: Lazy<IndexMap<String, Type>> = Lazy::new(|| {
     mapping.insert(MACADDR_TYPE_STR.to_string(), Type::MACADDR);
     mapping.insert(MACADDR8_TYPE_STR.to_string(), Type::MACADDR8);
     mapping.insert(IP_FAMILY_TYPE_STR.to_string(), Type::IP_FAMILY);
+    mapping.insert(
+        RESOLVABLE_STRING_TYPE_STR.to_string(),
+        Type::RESOLVABLE_STRING,
+    );
     mapping.insert("[]".to_string(), Type::list(Arc::new(Type::ANY)));
     mapping.insert("[any]".to_string(), Type::list(Arc::new(Type::ANY)));
     mapping.insert("[str]".to_string(), Type::list(Arc::new(Type::STR)));
@@ -180,6 +189,12 @@ impl Type {
     pub const IP_FAMILY: Type = Type {
         kind: TypeKind::IpFamily,
         flags: TypeFlags::IP_FAMILY,
+        is_type_alias: false,
+    };
+    /// Type constant `ResolvableString` (F2.6).
+    pub const RESOLVABLE_STRING: Type = Type {
+        kind: TypeKind::ResolvableString,
+        flags: TypeFlags::RESOLVABLE_STRING,
         is_type_alias: false,
     };
 }

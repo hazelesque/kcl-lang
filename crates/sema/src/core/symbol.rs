@@ -410,6 +410,7 @@ impl SymbolData {
             TypeKind::Macaddr => None,
             TypeKind::Macaddr8 => None,
             TypeKind::IpFamily => None,
+            TypeKind::ResolvableString => None,
         }
     }
 
@@ -477,12 +478,15 @@ impl SymbolData {
                 result
             }
             // F1.2: mokkan primitive types have no attributes in F1
-            // (the algebra package lands in F1.4).
+            // (the algebra package lands in F1.4). F2.6 added
+            // ResolvableString — same shape (primitive-typed
+            // payload, no attributes from the type system).
             TypeKind::Cidr
             | TypeKind::Inet
             | TypeKind::Macaddr
             | TypeKind::Macaddr8
-            | TypeKind::IpFamily => vec![],
+            | TypeKind::IpFamily
+            | TypeKind::ResolvableString => vec![],
         }
     }
 
@@ -530,12 +534,13 @@ impl SymbolData {
                 .get_symbol(self.get_type_symbol(ty, module_info)?)?
                 .get_attribute(name, self, module_info),
             // F1.2: mokkan primitive types — no attribute resolution
-            // in F1.
+            // in F1. F2.6 added ResolvableString — same shape.
             TypeKind::Cidr
             | TypeKind::Inet
             | TypeKind::Macaddr
             | TypeKind::Macaddr8
-            | TypeKind::IpFamily => None,
+            | TypeKind::IpFamily
+            | TypeKind::ResolvableString => None,
         }
     }
 

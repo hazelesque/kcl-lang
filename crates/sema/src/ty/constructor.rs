@@ -48,6 +48,10 @@ impl Type {
     pub fn ip_family_ref() -> TypeRef {
         Arc::new(Type::IP_FAMILY)
     }
+    #[inline]
+    pub fn resolvable_string_ref() -> TypeRef {
+        Arc::new(Type::RESOLVABLE_STRING)
+    }
     /// Construct a any type reference.
     #[inline]
     pub fn any_ref() -> TypeRef {
@@ -394,12 +398,16 @@ impl Type {
             | TypeKind::NumberMultiplier(_)
             | TypeKind::Function(_)
             // F1.2: mokkan native types — assignable like other
-            // primitives. `field: cidr = ...` works.
+            // primitives. `field: cidr = ...` works. F2.6 added
+            // ResolvableString — same shape: `field: ResolvableString = ...`
+            // accepts a str (coerced via F2.6's str→RS unify branch)
+            // or an explicit RS value.
             | TypeKind::Cidr
             | TypeKind::Inet
             | TypeKind::Macaddr
             | TypeKind::Macaddr8
-            | TypeKind::IpFamily => true,
+            | TypeKind::IpFamily
+            | TypeKind::ResolvableString => true,
             TypeKind::Void | TypeKind::Module(_) | TypeKind::Named(_) => false,
         }
     }
@@ -427,5 +435,13 @@ impl Type {
     #[inline]
     pub fn is_ip_family(&self) -> bool {
         self.flags.contains(TypeFlags::IP_FAMILY)
+    }
+    /// F2.6: type-check predicate for `ResolvableString`. Used by
+    /// the F2.6 union-discipline validator (a `T | ResolvableString`
+    /// field has T in one arm and ResolvableString in the other) and
+    /// by codegen's F2.7 transparent-resolvable shape detection.
+    #[inline]
+    pub fn is_resolvable_string(&self) -> bool {
+        self.flags.contains(TypeFlags::RESOLVABLE_STRING)
     }
 }

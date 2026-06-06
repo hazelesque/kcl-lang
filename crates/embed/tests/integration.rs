@@ -1547,3 +1547,156 @@ fn symbolic_subnet_rejects_string_family_at_resolve_time() {
         other => panic!("expected Resolve/Evaluate error, got: {other:?}"),
     }
 }
+
+// ────────────────────────────────────────────────────────────────────
+// F2.6 — `ResolvableString` schema-field type registration + D5 type
+// discipline.
+// ────────────────────────────────────────────────────────────────────
+
+/// `field: ResolvableString` accepts a bare string literal — the
+/// runtime coerces via the F2.6 str→RS path, wrapping in a single
+/// Literal segment. Result is fully eager (no symbolic segments) but
+/// type-shaped as ResolvableString for downstream codegen.
+#[test]
+fn resolvable_string_field_accepts_string_literal() {
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "schema Cfg:\n",
+                "    msg: ResolvableString\n",
+                "\n",
+                "cfg = Cfg {\n",
+                "    msg = \"hello\"\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+    let msg = cfg.dict_get_value("msg").unwrap();
+    assert_eq!(msg.type_str(), "ResolvableString");
+    // Display concatenates literal segments — single Literal renders
+    // as the string itself.
+    assert_eq!(format!("{msg}"), "hello");
+}
+
+/// `field: str | ResolvableString` is the canonical opt-in shape per
+/// F2.6 / D5. A bare string goes through the str arm; an explicit
+/// ResolvableString (e.g., from `text(symbolic_inet)`) goes through
+/// the RS arm. Both must accept.
+#[test]
+fn str_or_resolvable_string_field_accepts_both_arms() {
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "import mokkan.net\n",
+                "import mokkan.net_symbolic\n",
+                "\n",
+                "schema Cfg:\n",
+                "    eager: str | ResolvableString\n",
+                "    deferred: str | ResolvableString\n",
+                "\n",
+                "cfg = Cfg {\n",
+                "    eager = \"plain string\"\n",
+                // text(symbolic_inet) produces a single-Symbolic RS,
+                // which satisfies the RS arm.
+                "    deferred = net.text(net_symbolic.symbolic_inet(\"lan\", 10))\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+    let eager = cfg.dict_get_value("eager").unwrap();
+    let deferred = cfg.dict_get_value("deferred").unwrap();
+    // The eager arm may pass through as `str` (matches union arm
+    // directly) or be coerced to `ResolvableString` (per the F2.6
+    // str→RS unify branch). Either is semantically correct.
+    assert!(
+        matches!(eager.type_str().as_str(), "str" | "ResolvableString"),
+        "unexpected eager type_str: {}",
+        eager.type_str()
+    );
+    // The deferred path produces a ResolvableString from text(symbolic).
+    assert_eq!(deferred.type_str(), "ResolvableString");
+}
+
+/// F2.6 / D5: multi-segment ResolvableString in a `cidr | ResolvableString`
+/// field should be REJECTED. The resolver can substitute a single
+/// resolved value for a single Symbolic segment, but multi-segment
+/// (Literal + Symbolic + Literal etc.) can't be parsed back as cidr
+/// — there's no shape for "literal prefix concatenated with a cidr".
+#[test]
+fn multi_segment_resolvable_string_rejected_in_non_str_arm() {
+    let ready = Embedded::new().build();
+    let err = ready
+        .evaluate(EvaluateArgs {
+            main_source: concat!(
+                "import mokkan.net\n",
+                "import mokkan.net_symbolic\n",
+                "\n",
+                "schema Cfg:\n",
+                // The `cidr | ResolvableString` shape opts in to
+                // symbolic-cidr but only for SINGLE-segment RS.
+                "    c: cidr | ResolvableString\n",
+                "\n",
+                "cfg = Cfg {\n",
+                // Build a multi-segment RS by concatenating literals
+                // with the symbolic stringification. Result has 3
+                // segments: Literal(\"prefix-\") + Symbolic(Text(...))
+                // + Literal(\"-suffix\"). cidr arm rejects (can't
+                // parse), RS arm rejects (multi-segment + non-str
+                // other arm).
+                "    c = \"prefix-\" + net.text(net_symbolic.symbolic_inet(\"lan\", 10)) + \"-suffix\"\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        })
+        .expect_err("multi-segment RS in `cidr | ResolvableString` must reject");
+    match err {
+        EvaluationError::Resolve(_) | EvaluationError::Evaluate(_) => {}
+        other => panic!("expected Resolve/Evaluate error, got: {other:?}"),
+    }
+}
+
+/// F2.6 / D5: multi-segment ResolvableString in a `str | ResolvableString`
+/// field is ACCEPTED — str is "anything-shaped" so concatenation
+/// works. The discipline only fires when the non-RS arm is non-str.
+#[test]
+fn multi_segment_resolvable_string_accepted_in_str_arm() {
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "import mokkan.net\n",
+                "import mokkan.net_symbolic\n",
+                "\n",
+                "schema Cfg:\n",
+                "    msg: str | ResolvableString\n",
+                "\n",
+                "cfg = Cfg {\n",
+                // Same shape as the previous test — 3-segment RS —
+                // but the union's other arm is `str` so the D5
+                // discipline allows it.
+                "    msg = \"prefix-\" + net.text(net_symbolic.symbolic_inet(\"lan\", 10)) + \"-suffix\"\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+    let msg = cfg.dict_get_value("msg").unwrap();
+    assert_eq!(msg.type_str(), "ResolvableString");
+}

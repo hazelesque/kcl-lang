@@ -45,6 +45,15 @@ pub fn subsume(ty_lhs: TypeRef, ty_rhs: TypeRef, check_left_any: bool) -> bool {
         // `StrLit("...")` because both carry the STR flag (see
         // `Type::str_lit` constructor at constants.rs).
         true
+    } else if ty_lhs.is_str() && ty_rhs.is_resolvable_string() {
+        // F2.6: str → ResolvableString is assignable. Runtime
+        // coercion wraps the string in a single-Literal segment.
+        // Strict-`str` fields still reject ResolvableString in the
+        // other direction (the unify_str_into_resolvable_string
+        // direction is allowed; the reverse — resolvable → str — is
+        // not, because the runtime can't peek inside symbolic
+        // segments to validate).
+        true
     } else if ty_lhs.is_number_multiplier() && ty_rhs.is_number_multiplier() {
         let ty_lhs = ty_lhs.into_number_multiplier();
         let ty_rhs = ty_rhs.into_number_multiplier();

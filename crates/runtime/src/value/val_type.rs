@@ -103,6 +103,13 @@ pub fn try_coerce_mokkan_inet(value: &ValueRef, tpe: &str) -> Option<ValueRef> {
         MOKKAN_TYPE_MACADDR8 => macaddr::MacAddr8::from_str(&s)
             .ok()
             .map(|m| ValueRef::from(Value::macaddr8_value(m))),
+        // F2.6: str → ResolvableString. Wraps the string in a
+        // single-Literal segment — the result is fully eager (no
+        // symbolic segments), but the type discipline (D5) requires
+        // the wrapper for downstream schema-validation.
+        MOKKAN_TYPE_RESOLVABLE_STRING => Some(ValueRef::from(Value::resolvable_string_value(
+            crate::value::ResolvableString::from_literal(s),
+        ))),
         _ => None,
     }
 }
@@ -525,12 +532,36 @@ pub fn check_type(value: &ValueRef, pkgpath: &str, tpe: &str, strict: bool) -> b
 pub fn check_type_union(value: &ValueRef, pkgpath: &str, tpe: &str) -> bool {
     let expected_types = split_type_union(tpe);
     if expected_types.len() <= 1 {
-        false
-    } else {
-        expected_types
-            .iter()
-            .any(|tpe| check_type(value, pkgpath, tpe, false))
+        return false;
     }
+
+    // F2.6 / D5: multi-segment `ResolvableString` into a
+    // `T | ResolvableString` union where T is not `str` → reject.
+    // The resolver substitutes a single resolved value for a single
+    // Symbolic segment; with multiple segments the resolved string
+    // can't be parsed back into the non-str arm (e.g.,
+    // `"prefix-10.0.0.0/24"` doesn't parse as cidr). Single-Symbolic
+    // and pure-Literal segment lists pass through to the regular
+    // arm-match below.
+    //
+    // Discipline only fires for actual `ResolvableString` Value
+    // variants — operators can still write `field: cidr | str` and
+    // pass any `str` to it without surprise.
+    if let crate::Value::resolvable_string_value(rs) = &*value.rc.borrow()
+        && rs.segments.len() > 1
+        && expected_types
+            .iter()
+            .any(|t| t.trim() == "ResolvableString")
+        && expected_types
+            .iter()
+            .any(|t| t.trim() != "ResolvableString" && t.trim() != "str")
+    {
+        return false;
+    }
+
+    expected_types
+        .iter()
+        .any(|tpe| check_type(value, pkgpath, tpe, false))
 }
 
 /// check_type_literal returns the value wether match the given the literal type string

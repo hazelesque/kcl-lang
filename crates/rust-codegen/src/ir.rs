@@ -817,6 +817,21 @@ fn field_kind_for(
         TypeKind::Macaddr => FieldKind::Macaddr,
         TypeKind::Macaddr8 => FieldKind::Macaddr8,
         TypeKind::IpFamily => FieldKind::IpFamily,
+        // F2.6: ResolvableString as a standalone field type isn't
+        // useful — the operator wants `T | ResolvableString` (the
+        // F2.7 "transparent-resolvable" shape that emits as
+        // `Resolvable<T>`). A bare-RS field would emit as something
+        // like `kcl_runtime::ResolvableString` but consumers can't
+        // do anything useful with it because there's no resolver
+        // pass to substitute symbolic segments. F2.7 wires the
+        // union-shape codegen; until then, refuse with a pointer.
+        TypeKind::ResolvableString => FieldKind::Unsupported(
+            "bare ResolvableString field — F2.7 wires the `T | ResolvableString` union codegen \
+             which emits as `Resolvable<T>`; a bare-RS field has no useful Rust shape until \
+             then. If you're declaring a deferred-string slot, write \
+             `field: str | ResolvableString` and re-run codegen after F2.7."
+                .to_string(),
+        ),
     }
 }
 
