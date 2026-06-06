@@ -672,6 +672,72 @@ mod tests {
         );
     }
 
+    /// F2.7c end-to-end: KCL schema with `Resolvable<T>` fields gets
+    /// a codegen-emitted `walk_resolvables` method and a closed
+    /// `ResolvableField<'a>` enum at module level. Visiting via the
+    /// walker hands the visitor each Resolvable slot with its
+    /// dotted field path so downstream resolvers can substitute in
+    /// place.
+    #[test]
+    fn analyse_and_generate_walk_resolvables_walker() {
+        let src = concat!(
+            "schema Cfg:\n",
+            "    command: str | ResolvableString\n",
+            "    subnet: cidr | ResolvableString\n",
+            "    inline: [str | ResolvableString]\n",
+            "    labels: {str: str | ResolvableString}\n",
+        );
+        let out = generate_to_string(src).expect("generate");
+
+        // Closed ResolvableField enum with one variant per distinct T.
+        assert!(
+            out.contains("pub enum ResolvableField<'a> {"),
+            "ResolvableField enum:\n{out}"
+        );
+        assert!(
+            out.contains("Str(&'a mut kcl_embed::resolve::Resolvable<String>)"),
+            "Str variant:\n{out}"
+        );
+        assert!(
+            out.contains("Cidr(&'a mut kcl_embed::resolve::Resolvable<cidr::IpCidr>)"),
+            "Cidr variant:\n{out}"
+        );
+
+        // Per-schema walker impl block + entry method shape.
+        assert!(out.contains("impl Cfg {"), "Cfg walker impl block:\n{out}");
+        assert!(
+            out.contains("pub fn walk_resolvables<F, E>(&mut self, mut visit: F) -> Result<(), E>"),
+            "walk_resolvables entry signature:\n{out}"
+        );
+        // Bare-field path:
+        assert!(
+            out.contains("__visit(&__field_path, ResolvableField::Str(&mut self.command))?;"),
+            "command visit:\n{out}"
+        );
+        assert!(
+            out.contains("__visit(&__field_path, ResolvableField::Cidr(&mut self.subnet))?;"),
+            "subnet visit:\n{out}"
+        );
+        // List iteration with index path:
+        assert!(
+            out.contains("for (__i, __elem) in self.inline.iter_mut().enumerate() {"),
+            "inline list iter:\n{out}"
+        );
+        assert!(
+            out.contains("__visit(&__child_path, ResolvableField::Str(__elem))?;"),
+            "inline elem visit:\n{out}"
+        );
+        // Dict iteration with key path:
+        assert!(
+            out.contains("for (__k, __v) in self.labels.iter_mut() {"),
+            "labels dict iter:\n{out}"
+        );
+        assert!(
+            out.contains("__visit(&__child_path, ResolvableField::Str(__v))?;"),
+            "labels value visit:\n{out}"
+        );
+    }
+
     /// F2.7b — three-arm union with ResolvableString refuses to
     /// codegen with a clear error pointing at the constraint
     /// (split into separate fields, or write Rust by hand).

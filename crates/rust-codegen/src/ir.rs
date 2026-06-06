@@ -264,6 +264,42 @@ impl FieldKind {
             _ => false,
         }
     }
+
+    /// F2.7c: whether this kind contains a `Resolvable<T>` at any
+    /// nesting level (including inside Lists, Dicts, or
+    /// `Resolvable<T>` itself). Used by emit_walk_resolvables to
+    /// decide whether the field body needs to recurse. Does NOT
+    /// recurse into `Schema(_)` — that's whether the OUTER schema
+    /// has Resolvables, which depends on the referenced schema's
+    /// own walker and is checked via the per-schema lookup.
+    pub fn contains_resolvable(&self) -> bool {
+        match self {
+            FieldKind::Resolvable(_) => true,
+            FieldKind::List(inner) => inner.contains_resolvable(),
+            FieldKind::Dict(_, v) => v.contains_resolvable(),
+            _ => false,
+        }
+    }
+
+    /// F2.7c: collect the T-type Rust expressions appearing in
+    /// `Resolvable<T>` positions inside this kind. Used by the
+    /// two-pass codegen to build the closed `ResolvableField<'a>`
+    /// enum's variant list — the global set across all schemas
+    /// becomes the enum's variants. Same nesting rules as
+    /// `contains_resolvable`.
+    pub fn collect_resolvable_t_rust_types(&self, out: &mut Vec<String>) {
+        match self {
+            FieldKind::Resolvable(inner) => {
+                let ty = inner.to_rust_type();
+                if !out.contains(&ty) {
+                    out.push(ty);
+                }
+            }
+            FieldKind::List(inner) => inner.collect_resolvable_t_rust_types(out),
+            FieldKind::Dict(_, v) => v.collect_resolvable_t_rust_types(out),
+            _ => {}
+        }
+    }
 }
 
 /// Walk the resolved program's main package, extract every schema

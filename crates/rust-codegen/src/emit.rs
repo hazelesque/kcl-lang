@@ -188,6 +188,24 @@ mod _kcl_codegen_helpers {
         }
         Ok(out)
     }
+
+    // F2.7c: dotted field-path constructors. Threaded by the
+    // codegen-emitted walk_resolvables impls so the visitor sees
+    // each Resolvable<T> slot's full path (e.g.
+    // `vms.chimera1.provision[2].command`).
+    pub fn join_path(prefix: &str, field: &str) -> String {
+        if prefix.is_empty() {
+            field.to_string()
+        } else {
+            format!("{prefix}.{field}")
+        }
+    }
+    pub fn join_index_path(prefix: &str, i: usize) -> String {
+        format!("{prefix}[{i}]")
+    }
+    pub fn join_key_path(prefix: &str, k: &str) -> String {
+        format!("{prefix}[{k:?}]")
+    }
 }
 
 "##;
@@ -207,7 +225,378 @@ pub(crate) fn emit_rust_source(module: &ModuleIR) -> Result<String, CodegenError
         emit_struct(&mut out, schema);
         emit_try_from(&mut out, schema);
     }
+    // F2.7c: closed `ResolvableField<'a>` enum + per-schema /
+    // per-tagged-enum `walk_resolvables` impls. Skipped entirely
+    // for modules without any `Resolvable<T>` field — pure-F1
+    // codegen targets stay the same size and shape as before.
+    let t_types = collect_module_resolvable_t_types(module);
+    if !t_types.is_empty() {
+        emit_resolvable_field_enum(&mut out, &t_types);
+        for schema in &module.schemas {
+            emit_schema_walk_resolvables(&mut out, schema, module);
+        }
+        for tagged in &module.tagged_enums {
+            emit_tagged_walk_resolvables(&mut out, tagged, module);
+        }
+    }
     Ok(out)
+}
+
+// F2.7c: collect every distinct Rust type expression `T` appearing in
+// a `Resolvable<T>` position across the module's schemas and tagged
+// enums. The order is "first-occurrence" — stable enough for golden
+// snapshots, deterministic across runs because schema/field iteration
+// is deterministic.
+fn collect_module_resolvable_t_types(module: &ModuleIR) -> Vec<String> {
+    let mut out = Vec::new();
+    for schema in &module.schemas {
+        for field in &schema.fields {
+            field.kind.collect_resolvable_t_rust_types(&mut out);
+        }
+    }
+    for tagged in &module.tagged_enums {
+        for variant in &tagged.variants {
+            for field in &variant.fields {
+                field.kind.collect_resolvable_t_rust_types(&mut out);
+            }
+        }
+        for field in &tagged.shared_fields {
+            field.kind.collect_resolvable_t_rust_types(&mut out);
+        }
+    }
+    out
+}
+
+/// Map a `Resolvable<T>` inner-type Rust expression to a
+/// PascalCase enum-variant name. Explicit table for the
+/// well-known set covered by F1/F2; everything else falls back to
+/// "last `::`-segment, first char uppercased". Collisions are not
+/// detected here — two distinct T types that map to the same
+/// variant name produce a compile error in the generated code,
+/// which is the right place for the operator to discover the
+/// conflict.
+fn resolvable_variant_name(rust_ty: &str) -> String {
+    match rust_ty {
+        "String" => "Str".to_string(),
+        "i64" => "Int".to_string(),
+        "f64" => "Float".to_string(),
+        "bool" => "Bool".to_string(),
+        "cidr::IpCidr" => "Cidr".to_string(),
+        "cidr::IpInet" => "Inet".to_string(),
+        "macaddr::MacAddr6" => "Macaddr".to_string(),
+        "macaddr::MacAddr8" => "Macaddr8".to_string(),
+        "kcl_runtime::IpFamily" => "IpFamily".to_string(),
+        other => {
+            let last = other.rsplit("::").next().unwrap_or(other);
+            let mut chars = last.chars();
+            match chars.next() {
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                None => "Unknown".to_string(),
+            }
+        }
+    }
+}
+
+fn emit_resolvable_field_enum(out: &mut String, t_types: &[String]) {
+    out.push_str("/// F2.7c: closed enum over every `Resolvable<T>` T type appearing\n");
+    out.push_str("/// in this module's schemas. The codegen-emitted `walk_resolvables`\n");
+    out.push_str("/// methods hand a `&mut` reference to the matching variant to the\n");
+    out.push_str("/// visitor closure, so resolvers can replace `Pending(...)` with\n");
+    out.push_str("/// `Resolved(...)` in place.\n");
+    out.push_str("pub enum ResolvableField<'a> {\n");
+    for t in t_types {
+        let variant = resolvable_variant_name(t);
+        out.push_str(&format!(
+            "    {variant}(&'a mut kcl_embed::resolve::Resolvable<{t}>),\n"
+        ));
+    }
+    out.push_str("}\n\n");
+}
+
+/// Whether walking a value of this kind can ever reach a
+/// `Resolvable<T>`. Treats `Schema(_)` as walkable unconditionally —
+/// every schema in the module gets a `walk_resolvables_at` method
+/// (potentially a no-op), so calling it is always safe and the
+/// caller doesn't need to track which schemas in fact contain
+/// Resolvables transitively. This also dodges the cycle-detection
+/// problem for mutually-recursive schemas.
+fn needs_walking(kind: &FieldKind) -> bool {
+    match kind {
+        FieldKind::Resolvable(_) => true,
+        FieldKind::List(inner) => needs_walking(inner),
+        FieldKind::Dict(_, v) => needs_walking(v),
+        FieldKind::Schema(_) => true,
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Bind {
+    /// `binding` is a place expression of type `T` (we need `&mut <binding>`
+    /// to get `&mut T`). Used at the field-access entry point —
+    /// `self.foo` is Owned.
+    Owned,
+    /// `binding` is already an expression of type `&mut T` (from a
+    /// `for (_, elem) in ...iter_mut()` loop, or from a `match &mut self`
+    /// pattern destructure, or from `if let Some(inner) = &mut self.foo`).
+    BorrowMut,
+}
+
+/// Emit code that walks a value of the given kind, calling `__visit`
+/// for each contained `Resolvable<T>`. `binding` is the Rust
+/// expression naming the value; `bind` is whether `binding` is owned
+/// or `&mut`-borrowed; `path_expr` is a Rust expression of type
+/// `&str` (or coerces to it) holding the field path to pass to
+/// `__visit`.
+fn emit_kind_walk(
+    out: &mut String,
+    binding: &str,
+    bind: Bind,
+    path_expr: &str,
+    kind: &FieldKind,
+    indent: &str,
+) {
+    match kind {
+        FieldKind::Resolvable(inner) => {
+            let inner_ty = inner.to_rust_type();
+            let variant = resolvable_variant_name(&inner_ty);
+            let arg = match bind {
+                Bind::Owned => format!("&mut {binding}"),
+                Bind::BorrowMut => binding.to_string(),
+            };
+            out.push_str(&format!(
+                "{indent}__visit({path_expr}, ResolvableField::{variant}({arg}))?;\n"
+            ));
+        }
+        FieldKind::List(inner) => {
+            if !needs_walking(inner) {
+                return;
+            }
+            out.push_str(&format!(
+                "{indent}for (__i, __elem) in {binding}.iter_mut().enumerate() {{\n"
+            ));
+            let inner_indent = format!("{indent}    ");
+            out.push_str(&format!(
+                "{inner_indent}let __child_path = _kcl_codegen_helpers::join_index_path({path_expr}, __i);\n"
+            ));
+            emit_kind_walk(
+                out,
+                "__elem",
+                Bind::BorrowMut,
+                "&__child_path",
+                inner,
+                &inner_indent,
+            );
+            out.push_str(&format!("{indent}}}\n"));
+        }
+        FieldKind::Dict(_, val) => {
+            if !needs_walking(val) {
+                return;
+            }
+            out.push_str(&format!(
+                "{indent}for (__k, __v) in {binding}.iter_mut() {{\n"
+            ));
+            let inner_indent = format!("{indent}    ");
+            out.push_str(&format!(
+                "{inner_indent}let __child_path = _kcl_codegen_helpers::join_key_path({path_expr}, __k);\n"
+            ));
+            emit_kind_walk(
+                out,
+                "__v",
+                Bind::BorrowMut,
+                "&__child_path",
+                val,
+                &inner_indent,
+            );
+            out.push_str(&format!("{indent}}}\n"));
+        }
+        FieldKind::Schema(_) => {
+            out.push_str(&format!(
+                "{indent}{binding}.walk_resolvables_at({path_expr}, __visit)?;\n"
+            ));
+        }
+        _ => {}
+    }
+}
+
+/// Emit the per-field walk fragment for a struct schema. `self.<name>`
+/// is the access expression; the entry point is Owned because the
+/// caller's `&mut self` is doing the borrow.
+fn emit_struct_field_walk(out: &mut String, field: &FieldIR, indent: &str) {
+    if !needs_walking(&field.kind) {
+        return;
+    }
+    let binding = escape_rust_keyword(&field.name);
+    let field_name = &field.name;
+    let inner_indent = format!("{indent}    ");
+    out.push_str(&format!("{indent}{{\n"));
+    out.push_str(&format!(
+        "{inner_indent}let __field_path = _kcl_codegen_helpers::join_path(__prefix, \"{field_name}\");\n"
+    ));
+    if field.optional && !field.has_default {
+        out.push_str(&format!(
+            "{inner_indent}if let Some(__inner) = &mut self.{binding} {{\n"
+        ));
+        let deeper_indent = format!("{inner_indent}    ");
+        emit_kind_walk(
+            out,
+            "__inner",
+            Bind::BorrowMut,
+            "&__field_path",
+            &field.kind,
+            &deeper_indent,
+        );
+        out.push_str(&format!("{inner_indent}}}\n"));
+    } else {
+        let binding_expr = format!("self.{binding}");
+        emit_kind_walk(
+            out,
+            &binding_expr,
+            Bind::Owned,
+            "&__field_path",
+            &field.kind,
+            &inner_indent,
+        );
+    }
+    out.push_str(&format!("{indent}}}\n"));
+}
+
+/// Emit the per-field walk fragment for a tagged-enum variant.
+/// Pattern bindings are always `&mut T` (since the match is on
+/// `&mut self`), so we use BorrowMut and reach into `Option` via
+/// `.as_mut()`.
+fn emit_tagged_field_walk(out: &mut String, field: &FieldIR, indent: &str) {
+    if !needs_walking(&field.kind) {
+        return;
+    }
+    let binding = escape_rust_keyword(&field.name);
+    let field_name = &field.name;
+    let inner_indent = format!("{indent}    ");
+    out.push_str(&format!("{indent}{{\n"));
+    out.push_str(&format!(
+        "{inner_indent}let __field_path = _kcl_codegen_helpers::join_path(__prefix, \"{field_name}\");\n"
+    ));
+    if field.optional && !field.has_default {
+        out.push_str(&format!(
+            "{inner_indent}if let Some(__inner) = {binding}.as_mut() {{\n"
+        ));
+        let deeper_indent = format!("{inner_indent}    ");
+        emit_kind_walk(
+            out,
+            "__inner",
+            Bind::BorrowMut,
+            "&__field_path",
+            &field.kind,
+            &deeper_indent,
+        );
+        out.push_str(&format!("{inner_indent}}}\n"));
+    } else {
+        emit_kind_walk(
+            out,
+            &binding,
+            Bind::BorrowMut,
+            "&__field_path",
+            &field.kind,
+            &inner_indent,
+        );
+    }
+    out.push_str(&format!("{indent}}}\n"));
+}
+
+fn emit_walk_resolvables_header(out: &mut String, name: &str) {
+    out.push_str(&format!("impl {name} {{\n"));
+    out.push_str("    /// F2.7c: visit every `Resolvable<T>` slot in this value (including\n");
+    out.push_str("    /// those inside `Vec<_>`, `HashMap<_, _>`, and nested schemas /\n");
+    out.push_str("    /// tagged-enum variants), passing each one to the visitor closure\n");
+    out.push_str("    /// with its dotted field path. The visitor receives a `&mut\n");
+    out.push_str("    /// Resolvable<T>`, so it can replace `Pending` with `Resolved` in\n");
+    out.push_str("    /// place.\n");
+    out.push_str("    pub fn walk_resolvables<F, E>(&mut self, mut visit: F) -> Result<(), E>\n");
+    out.push_str("    where\n");
+    out.push_str("        F: FnMut(&str, ResolvableField<'_>) -> Result<(), E>,\n");
+    out.push_str("    {\n");
+    out.push_str("        self.walk_resolvables_at(\"\", &mut visit)\n");
+    out.push_str("    }\n\n");
+    out.push_str("    #[doc(hidden)]\n");
+    out.push_str("    pub fn walk_resolvables_at<F, E>(\n");
+    out.push_str("        &mut self,\n");
+    out.push_str("        __prefix: &str,\n");
+    out.push_str("        __visit: &mut F,\n");
+    out.push_str("    ) -> Result<(), E>\n");
+    out.push_str("    where\n");
+    out.push_str("        F: FnMut(&str, ResolvableField<'_>) -> Result<(), E>,\n");
+    out.push_str("    {\n");
+}
+
+fn emit_schema_walk_resolvables(out: &mut String, schema: &SchemaIR, _module: &ModuleIR) {
+    let any_walkable = schema.fields.iter().any(|f| needs_walking(&f.kind));
+    emit_walk_resolvables_header(out, &schema.name);
+    if !any_walkable {
+        out.push_str("        let _ = __prefix;\n");
+        out.push_str("        let _ = __visit;\n");
+    } else {
+        for field in &schema.fields {
+            emit_struct_field_walk(out, field, "        ");
+        }
+    }
+    out.push_str("        Ok(())\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+}
+
+fn emit_tagged_walk_resolvables(out: &mut String, tagged: &TaggedEnumIR, _module: &ModuleIR) {
+    let any_walkable = tagged
+        .variants
+        .iter()
+        .any(|v| v.fields.iter().any(|f| needs_walking(&f.kind)))
+        || tagged.shared_fields.iter().any(|f| needs_walking(&f.kind));
+    emit_walk_resolvables_header(out, &tagged.name);
+    if !any_walkable {
+        out.push_str("        let _ = __prefix;\n");
+        out.push_str("        let _ = __visit;\n");
+        out.push_str("        Ok(())\n");
+        out.push_str("    }\n");
+        out.push_str("}\n\n");
+        return;
+    }
+    out.push_str("        match self {\n");
+    for variant in &tagged.variants {
+        let all_fields: Vec<&FieldIR> = variant
+            .fields
+            .iter()
+            .chain(tagged.shared_fields.iter())
+            .collect();
+        let walkable: Vec<&FieldIR> = all_fields
+            .iter()
+            .copied()
+            .filter(|f| needs_walking(&f.kind))
+            .collect();
+        if walkable.is_empty() {
+            out.push_str(&format!(
+                "            {}::{} {{ .. }} => {{}}\n",
+                tagged.name, variant.rust_name
+            ));
+        } else {
+            let pattern_fields: Vec<String> = walkable
+                .iter()
+                .map(|f| escape_rust_keyword(&f.name))
+                .collect();
+            out.push_str(&format!(
+                "            {}::{} {{ {}, .. }} => {{\n",
+                tagged.name,
+                variant.rust_name,
+                pattern_fields.join(", ")
+            ));
+            for field in &walkable {
+                emit_tagged_field_walk(out, field, "                ");
+            }
+            out.push_str("            }\n");
+        }
+    }
+    out.push_str("        }\n");
+    out.push_str("        Ok(())\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
 }
 
 fn emit_enum(out: &mut String, e: &EnumIR) {
@@ -604,7 +993,7 @@ fn emit_conv_closure(kind: &FieldKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::FieldIR;
+    use crate::ir::{FieldIR, TaggedEnumIR, TaggedEnumVariantIR};
 
     fn schema_ir_for(name: &str, fields: Vec<FieldIR>) -> SchemaIR {
         SchemaIR {
@@ -917,6 +1306,448 @@ mod tests {
                 "pub labels: std::collections::HashMap<String, kcl_embed::resolve::Resolvable<String>>,"
             ),
             "HashMap<String, Resolvable<String>>:\n{out}"
+        );
+    }
+
+    /// F2.7c — well-known variant-name mappings stay stable. The
+    /// fallback path (last `::` segment, first char uppercased) is
+    /// exercised here too so the open-set behaviour is pinned.
+    #[test]
+    fn resolvable_variant_name_mappings() {
+        assert_eq!(resolvable_variant_name("String"), "Str");
+        assert_eq!(resolvable_variant_name("i64"), "Int");
+        assert_eq!(resolvable_variant_name("f64"), "Float");
+        assert_eq!(resolvable_variant_name("bool"), "Bool");
+        assert_eq!(resolvable_variant_name("cidr::IpCidr"), "Cidr");
+        assert_eq!(resolvable_variant_name("cidr::IpInet"), "Inet");
+        assert_eq!(resolvable_variant_name("macaddr::MacAddr6"), "Macaddr");
+        assert_eq!(resolvable_variant_name("macaddr::MacAddr8"), "Macaddr8");
+        assert_eq!(resolvable_variant_name("kcl_runtime::IpFamily"), "IpFamily");
+        // Fallback: unknown last-segment, first char already upper.
+        assert_eq!(resolvable_variant_name("foo::Quux"), "Quux");
+        // Fallback: unknown last-segment, first char lower.
+        assert_eq!(resolvable_variant_name("foo::quux"), "Quux");
+    }
+
+    /// F2.7c — modules without any `Resolvable<T>` field don't get
+    /// the `ResolvableField` enum or any `walk_resolvables` impls.
+    /// Pure-F1 codegen targets stay the same shape as before.
+    #[test]
+    fn no_walker_emitted_for_pure_eager_module() {
+        let module = module_with_schemas(vec![schema_ir_for(
+            "Vm",
+            vec![FieldIR {
+                name: "name".into(),
+                kind: FieldKind::Str,
+                optional: false,
+                has_default: false,
+            }],
+        )]);
+        let out = emit_rust_source(&module).expect("emit");
+        assert!(
+            !out.contains("pub enum ResolvableField"),
+            "no Resolvable means no enum:\n{out}"
+        );
+        // The HELPERS comment references walk_resolvables, so look
+        // for the actual fn declaration instead of a bare substring.
+        assert!(
+            !out.contains("pub fn walk_resolvables"),
+            "no Resolvable means no walker:\n{out}"
+        );
+    }
+
+    /// F2.7c — a single `Resolvable<String>` field gets a walker
+    /// that calls `__visit` exactly once with the field path
+    /// `"command"`.
+    #[test]
+    fn walker_visits_single_resolvable_field() {
+        let module = module_with_schemas(vec![schema_ir_for(
+            "Cfg",
+            vec![FieldIR {
+                name: "command".into(),
+                kind: FieldKind::Resolvable(Box::new(FieldKind::Str)),
+                optional: false,
+                has_default: false,
+            }],
+        )]);
+        let out = emit_rust_source(&module).expect("emit");
+        // Closed enum has exactly the one variant.
+        assert!(
+            out.contains("pub enum ResolvableField<'a> {"),
+            "ResolvableField enum:\n{out}"
+        );
+        assert!(
+            out.contains("Str(&'a mut kcl_embed::resolve::Resolvable<String>)"),
+            "Str variant:\n{out}"
+        );
+        // Walker shape.
+        assert!(out.contains("impl Cfg {"), "walker impl block:\n{out}");
+        assert!(
+            out.contains("pub fn walk_resolvables<F, E>"),
+            "walk_resolvables fn:\n{out}"
+        );
+        assert!(
+            out.contains("pub fn walk_resolvables_at<F, E>"),
+            "walk_resolvables_at fn:\n{out}"
+        );
+        // Visit call uses the field path.
+        assert!(
+            out.contains(
+                "let __field_path = _kcl_codegen_helpers::join_path(__prefix, \"command\");"
+            ),
+            "field path constructed:\n{out}"
+        );
+        assert!(
+            out.contains("__visit(&__field_path, ResolvableField::Str(&mut self.command))?;"),
+            "visit call:\n{out}"
+        );
+    }
+
+    /// F2.7c — `Optional<Resolvable<T>>` walks only when `Some(_)`.
+    /// Wraps the visit call in an `if let Some(__inner) = &mut
+    /// self.<name>`.
+    #[test]
+    fn walker_handles_optional_resolvable() {
+        let module = module_with_schemas(vec![schema_ir_for(
+            "Cfg",
+            vec![FieldIR {
+                name: "script".into(),
+                kind: FieldKind::Resolvable(Box::new(FieldKind::Str)),
+                optional: true,
+                has_default: false,
+            }],
+        )]);
+        let out = emit_rust_source(&module).expect("emit");
+        assert!(
+            out.contains("if let Some(__inner) = &mut self.script {"),
+            "optional unwrap:\n{out}"
+        );
+        assert!(
+            out.contains("__visit(&__field_path, ResolvableField::Str(__inner))?;"),
+            "visit on unwrapped inner:\n{out}"
+        );
+    }
+
+    /// F2.7c — `Vec<Resolvable<T>>` iterates with index, building
+    /// `path[i]` child paths via the join_index_path helper.
+    #[test]
+    fn walker_iterates_list_of_resolvable() {
+        let module = module_with_schemas(vec![schema_ir_for(
+            "Step",
+            vec![FieldIR {
+                name: "inline".into(),
+                kind: FieldKind::List(Box::new(FieldKind::Resolvable(Box::new(FieldKind::Str)))),
+                optional: false,
+                has_default: false,
+            }],
+        )]);
+        let out = emit_rust_source(&module).expect("emit");
+        assert!(
+            out.contains("for (__i, __elem) in self.inline.iter_mut().enumerate() {"),
+            "list loop:\n{out}"
+        );
+        assert!(
+            out.contains(
+                "let __child_path = _kcl_codegen_helpers::join_index_path(&__field_path, __i);"
+            ),
+            "index path:\n{out}"
+        );
+        assert!(
+            out.contains("__visit(&__child_path, ResolvableField::Str(__elem))?;"),
+            "visit on borrowed elem:\n{out}"
+        );
+    }
+
+    /// F2.7c — `HashMap<_, Resolvable<T>>` iterates with key,
+    /// building `path[k]` child paths via the join_key_path helper.
+    #[test]
+    fn walker_iterates_dict_of_resolvable() {
+        let module = module_with_schemas(vec![schema_ir_for(
+            "Tags",
+            vec![FieldIR {
+                name: "labels".into(),
+                kind: FieldKind::Dict(
+                    Box::new(FieldKind::Str),
+                    Box::new(FieldKind::Resolvable(Box::new(FieldKind::Str))),
+                ),
+                optional: false,
+                has_default: false,
+            }],
+        )]);
+        let out = emit_rust_source(&module).expect("emit");
+        assert!(
+            out.contains("for (__k, __v) in self.labels.iter_mut() {"),
+            "dict loop:\n{out}"
+        );
+        assert!(
+            out.contains(
+                "let __child_path = _kcl_codegen_helpers::join_key_path(&__field_path, __k);"
+            ),
+            "key path:\n{out}"
+        );
+        assert!(
+            out.contains("__visit(&__child_path, ResolvableField::Str(__v))?;"),
+            "visit on borrowed value:\n{out}"
+        );
+    }
+
+    /// F2.7c — nested schema fields recurse into the inner schema's
+    /// own `walk_resolvables_at` with the dotted field path passed
+    /// down. The inner schema's walker may itself be a no-op (if it
+    /// has no Resolvables), but the call is uniformly emitted so the
+    /// outer codegen doesn't need to know.
+    #[test]
+    fn walker_recurses_into_nested_schemas() {
+        let mut module = module_with_schemas(vec![
+            schema_ir_for(
+                "Vm",
+                vec![FieldIR {
+                    name: "provision".into(),
+                    kind: FieldKind::Schema("ProvisionStep".into()),
+                    optional: false,
+                    has_default: false,
+                }],
+            ),
+            schema_ir_for(
+                "ProvisionStep",
+                vec![FieldIR {
+                    name: "command".into(),
+                    kind: FieldKind::Resolvable(Box::new(FieldKind::Str)),
+                    optional: false,
+                    has_default: false,
+                }],
+            ),
+        ]);
+        // Vm itself has no Resolvable; the module-wide collector
+        // picks ProvisionStep.command's Resolvable<String> up.
+        let out = emit_rust_source(&mut module).expect("emit");
+        assert!(out.contains("impl Vm {"), "Vm walker impl block:\n{out}");
+        assert!(
+            out.contains("self.provision.walk_resolvables_at(&__field_path, __visit)?;"),
+            "recurses into nested schema:\n{out}"
+        );
+        assert!(
+            out.contains("impl ProvisionStep {"),
+            "ProvisionStep walker impl block:\n{out}"
+        );
+    }
+
+    /// F2.7c — schemas with no Resolvable fields in a module that DOES
+    /// have Resolvables get an empty no-op walker. Catches the
+    /// dead-code variable case (must use `let _ = __prefix; let _ =
+    /// __visit;` to suppress the unused warning).
+    #[test]
+    fn walker_emits_no_op_for_resolvable_free_schemas() {
+        let module = module_with_schemas(vec![
+            schema_ir_for(
+                "Plain",
+                vec![FieldIR {
+                    name: "name".into(),
+                    kind: FieldKind::Str,
+                    optional: false,
+                    has_default: false,
+                }],
+            ),
+            schema_ir_for(
+                "Cfg",
+                vec![FieldIR {
+                    name: "command".into(),
+                    kind: FieldKind::Resolvable(Box::new(FieldKind::Str)),
+                    optional: false,
+                    has_default: false,
+                }],
+            ),
+        ]);
+        let out = emit_rust_source(&module).expect("emit");
+        assert!(
+            out.contains("impl Plain {"),
+            "no-op walker still emitted:\n{out}"
+        );
+        // Empty body: `let _ = __prefix; let _ = __visit;`.
+        let plain_section = out
+            .split("impl Plain {")
+            .nth(1)
+            .and_then(|s| s.split("impl ").next())
+            .unwrap_or("");
+        assert!(
+            plain_section.contains("let _ = __prefix;"),
+            "no-op suppression: __prefix unused:\n{plain_section}"
+        );
+        assert!(
+            plain_section.contains("let _ = __visit;"),
+            "no-op suppression: __visit unused:\n{plain_section}"
+        );
+    }
+
+    /// F2.7c — `ResolvableField` enum collects across all schemas
+    /// in the module, deduplicated. Two schemas with the same T
+    /// produce one variant; two schemas with different Ts produce
+    /// two variants in first-occurrence order.
+    #[test]
+    fn resolvable_field_enum_dedupes_across_schemas() {
+        let module = module_with_schemas(vec![
+            schema_ir_for(
+                "A",
+                vec![FieldIR {
+                    name: "x".into(),
+                    kind: FieldKind::Resolvable(Box::new(FieldKind::Str)),
+                    optional: false,
+                    has_default: false,
+                }],
+            ),
+            schema_ir_for(
+                "B",
+                vec![
+                    FieldIR {
+                        name: "y".into(),
+                        kind: FieldKind::Resolvable(Box::new(FieldKind::Str)),
+                        optional: false,
+                        has_default: false,
+                    },
+                    FieldIR {
+                        name: "z".into(),
+                        kind: FieldKind::Resolvable(Box::new(FieldKind::Cidr)),
+                        optional: false,
+                        has_default: false,
+                    },
+                ],
+            ),
+        ]);
+        let out = emit_rust_source(&module).expect("emit");
+        // Exactly one Str variant despite two Resolvable<String> fields.
+        let str_variant_count = out
+            .matches("Str(&'a mut kcl_embed::resolve::Resolvable<String>)")
+            .count();
+        assert_eq!(str_variant_count, 1, "deduped Str:\n{out}");
+        assert!(
+            out.contains("Cidr(&'a mut kcl_embed::resolve::Resolvable<cidr::IpCidr>)"),
+            "Cidr variant present:\n{out}"
+        );
+        // First-occurrence order: Str (from A.x) precedes Cidr (from B.z).
+        let str_idx = out.find("Str(&'a mut").expect("Str variant present");
+        let cidr_idx = out.find("Cidr(&'a mut").expect("Cidr variant present");
+        assert!(
+            str_idx < cidr_idx,
+            "first-occurrence order Str before Cidr:\n{out}"
+        );
+    }
+
+    /// F2.7c — tagged enum variants pattern-destructure and walk
+    /// each variant's Resolvable fields. Other variants are
+    /// matched-but-skipped with `_ => {}`. (ProvisionStep is the
+    /// concrete Tilley case driving this.)
+    #[test]
+    fn walker_handles_tagged_enum_variants() {
+        let module = ModuleIR {
+            schemas: Vec::new(),
+            enums: Vec::new(),
+            tagged_enums: vec![TaggedEnumIR {
+                name: "ProvisionStep".into(),
+                source_file: "core.k".into(),
+                source_line: 0,
+                doc: String::new(),
+                discriminator: "type".into(),
+                shared_fields: Vec::new(),
+                variants: vec![
+                    TaggedEnumVariantIR {
+                        rust_name: "Inline".into(),
+                        kcl_literal: "inline".into(),
+                        fields: vec![FieldIR {
+                            name: "inline".into(),
+                            kind: FieldKind::List(Box::new(FieldKind::Resolvable(Box::new(
+                                FieldKind::Str,
+                            )))),
+                            optional: false,
+                            has_default: false,
+                        }],
+                    },
+                    TaggedEnumVariantIR {
+                        rust_name: "Script".into(),
+                        kcl_literal: "script".into(),
+                        fields: vec![FieldIR {
+                            name: "script".into(),
+                            kind: FieldKind::Resolvable(Box::new(FieldKind::Str)),
+                            optional: false,
+                            has_default: false,
+                        }],
+                    },
+                ],
+            }],
+        };
+        let out = emit_rust_source(&module).expect("emit");
+        assert!(
+            out.contains("impl ProvisionStep {"),
+            "tagged enum walker impl:\n{out}"
+        );
+        // Inline variant: destructure `inline`, iterate over the list.
+        assert!(
+            out.contains("ProvisionStep::Inline { inline, .. } => {"),
+            "Inline variant destructure:\n{out}"
+        );
+        assert!(
+            out.contains("for (__i, __elem) in inline.iter_mut().enumerate() {"),
+            "Inline iter_mut:\n{out}"
+        );
+        // Script variant: destructure `script` (already &mut
+        // Resolvable<String>), visit directly.
+        assert!(
+            out.contains("ProvisionStep::Script { script, .. } => {"),
+            "Script variant destructure:\n{out}"
+        );
+        assert!(
+            out.contains("__visit(&__field_path, ResolvableField::Str(script))?;"),
+            "Script visit:\n{out}"
+        );
+    }
+
+    /// F2.7c — tagged enum variants with no walkable fields get a
+    /// `_ => {}` skip arm rather than a destructure-and-walk arm.
+    #[test]
+    fn walker_skips_resolvable_free_tagged_variants() {
+        let module = ModuleIR {
+            schemas: Vec::new(),
+            enums: Vec::new(),
+            tagged_enums: vec![TaggedEnumIR {
+                name: "Step".into(),
+                source_file: "x.k".into(),
+                source_line: 0,
+                doc: String::new(),
+                discriminator: "type".into(),
+                shared_fields: Vec::new(),
+                variants: vec![
+                    TaggedEnumVariantIR {
+                        rust_name: "Eager".into(),
+                        kcl_literal: "eager".into(),
+                        fields: vec![FieldIR {
+                            name: "name".into(),
+                            kind: FieldKind::Str,
+                            optional: false,
+                            has_default: false,
+                        }],
+                    },
+                    TaggedEnumVariantIR {
+                        rust_name: "Symbolic".into(),
+                        kcl_literal: "symbolic".into(),
+                        fields: vec![FieldIR {
+                            name: "value".into(),
+                            kind: FieldKind::Resolvable(Box::new(FieldKind::Str)),
+                            optional: false,
+                            has_default: false,
+                        }],
+                    },
+                ],
+            }],
+        };
+        let out = emit_rust_source(&module).expect("emit");
+        // Eager arm: skipped.
+        assert!(
+            out.contains("Step::Eager { .. } => {}"),
+            "Eager skipped:\n{out}"
+        );
+        // Symbolic arm: destructured and visited.
+        assert!(
+            out.contains("Step::Symbolic { value, .. } => {"),
+            "Symbolic destructured:\n{out}"
         );
     }
 }
