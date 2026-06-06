@@ -2425,27 +2425,148 @@ macro_rules! register_mokkan_net_member {
         ];
     )
 }
-register_mokkan_net_member! {
-    // F1.4 single-function trial run — broadcast(inet) -> inet.
-    // The rest of the PG algebra (host, network, masklen,
-    // set_masklen, netmask, hostmask, family, text, abbrev,
-    // inet_merge, contains, contained_by, contains_eq, overlaps,
-    // inet_same_family) lands in the bulk-add follow-up.
-    broadcast => Type::function(
+/// One-arg `(addr: inet) -> <RET>` factory — used by every
+/// single-inet-arg function in the algebra (broadcast, host,
+/// masklen, netmask, hostmask, network, text, abbrev, family).
+/// The doc string is the only thing that varies per function.
+fn _mokkan_net_unary_inet(ret: TypeRef, doc: &str) -> Type {
+    Type::function(
         None,
-        Type::inet_ref(),
+        ret,
+        &[Parameter {
+            name: "addr".to_string(),
+            ty: Type::inet_ref(),
+            has_default: false,
+            default_value: None,
+            range: dummy_range(),
+        }],
+        doc,
+        false,
+        None,
+    )
+}
+
+/// Two-arg `(a: T_arg0, b: T_arg1) -> T_ret` factory. Used for the
+/// binary predicates (contains, contained_by, contains_eq,
+/// overlaps, inet_same_family) and `inet_merge`, `set_masklen`.
+fn _mokkan_net_binary(
+    arg0_name: &str,
+    arg0_ty: TypeRef,
+    arg1_name: &str,
+    arg1_ty: TypeRef,
+    ret: TypeRef,
+    doc: &str,
+) -> Type {
+    Type::function(
+        None,
+        ret,
         &[
             Parameter {
-                name: "addr".to_string(),
-                ty: Type::inet_ref(),
+                name: arg0_name.to_string(),
+                ty: arg0_ty,
+                has_default: false,
+                default_value: None,
+                range: dummy_range(),
+            },
+            Parameter {
+                name: arg1_name.to_string(),
+                ty: arg1_ty,
                 has_default: false,
                 default_value: None,
                 range: dummy_range(),
             },
         ],
-        r#"PostgreSQL `broadcast(inet)`: the broadcast address of an inet's enclosing network."#,
+        doc,
         false,
         None,
+    )
+}
+
+register_mokkan_net_member! {
+    // PG-shaped inet derivations producing inet.
+    broadcast => _mokkan_net_unary_inet(
+        Type::inet_ref(),
+        r#"PostgreSQL `broadcast(inet)`: the broadcast address of an inet's enclosing network."#,
+    )
+    netmask => _mokkan_net_unary_inet(
+        Type::inet_ref(),
+        r#"PostgreSQL `netmask(inet)`: the netmask as an inet (e.g., 255.255.255.0 for a /24)."#,
+    )
+    hostmask => _mokkan_net_unary_inet(
+        Type::inet_ref(),
+        r#"PostgreSQL `hostmask(inet)`: the host mask as an inet (bitwise complement of netmask)."#,
+    )
+    set_masklen => _mokkan_net_binary(
+        "addr", Type::inet_ref(),
+        "masklen", Type::int_ref(),
+        Type::inet_ref(),
+        r#"PostgreSQL `set_masklen(inet, int)`: set the network mask length of an inet."#,
+    )
+    // Producing cidr.
+    network => _mokkan_net_unary_inet(
+        Type::cidr_ref(),
+        r#"PostgreSQL `network(inet)`: the network portion (host bits zeroed) as a strict cidr."#,
+    )
+    inet_merge => _mokkan_net_binary(
+        "a", Type::inet_ref(),
+        "b", Type::inet_ref(),
+        Type::cidr_ref(),
+        r#"PostgreSQL `inet_merge(inet, inet)`: smallest cidr containing both."#,
+    )
+    // Producing int.
+    masklen => _mokkan_net_unary_inet(
+        Type::int_ref(),
+        r#"PostgreSQL `masklen(inet)`: the network mask length."#,
+    )
+    // Producing IpFamily (typed enum — mokkan divergence from PG's int).
+    family => _mokkan_net_unary_inet(
+        Type::ip_family_ref(),
+        r#"`family(inet)`: typed `IpFamily` enum. Differs from PG which returns int 4/6 — operators porting SQL rewrite `family(addr) == 4` as `family(addr) == net.V4`."#,
+    )
+    // Producing str.
+    host => _mokkan_net_unary_inet(
+        Type::str_ref(),
+        r#"PostgreSQL `host(inet)`: text form of the address without the masklen."#,
+    )
+    text => _mokkan_net_unary_inet(
+        Type::str_ref(),
+        r#"PostgreSQL `text(inet)`: canonical text form including masklen."#,
+    )
+    abbrev => _mokkan_net_unary_inet(
+        Type::str_ref(),
+        r#"PostgreSQL `abbrev(inet)`: text form with `/32` (v4) and `/128` (v6) suppressed at host-mask."#,
+    )
+    // Predicates on cidr.
+    contains => _mokkan_net_binary(
+        "outer", Type::cidr_ref(),
+        "inner", Type::cidr_ref(),
+        Type::bool_ref(),
+        r#"PostgreSQL `contains(cidr, cidr)`: outer strictly contains inner (proper subset)."#,
+    )
+    contained_by => _mokkan_net_binary(
+        "inner", Type::cidr_ref(),
+        "outer", Type::cidr_ref(),
+        Type::bool_ref(),
+        r#"PostgreSQL `contained_by(cidr, cidr)`: inner is a proper subset of outer."#,
+    )
+    contains_eq => _mokkan_net_binary(
+        "outer", Type::cidr_ref(),
+        "inner", Type::cidr_ref(),
+        Type::bool_ref(),
+        r#"PostgreSQL `contains_eq(cidr, cidr)`: outer contains inner or equals it."#,
+    )
+    overlaps => _mokkan_net_binary(
+        "a", Type::cidr_ref(),
+        "b", Type::cidr_ref(),
+        Type::bool_ref(),
+        r#"PostgreSQL `overlaps(cidr, cidr)`: the two networks share at least one address."#,
+    )
+    // Predicates on inet (family check).
+    inet_same_family => _mokkan_net_binary(
+        "a", Type::inet_ref(),
+        "b", Type::inet_ref(),
+        Type::bool_ref(),
+        r#"`inet_same_family(inet, inet)`: both addresses share the same IP family."#,
     )
 }
 

@@ -2,7 +2,28 @@
 //! full register_module -> build -> evaluate flow end-to-end through
 //! the loader-side virtual_packages hook landed in step 2.
 
-use kcl_embed::{Embedded, EvaluateArgs, EvaluationError};
+use kcl_embed::{Embedded, EvaluateArgs, EvaluationError, render_diagnostics};
+
+/// Test-runner helper: unwrap an `EvaluationError` into a
+/// pretty-rendered string that reads like the kcl CLI / Tilley CLI
+/// output. Without this, `evaluate(...).expect("…")` calls bury
+/// the diagnostic in a `Resolve([Diagnostic { messages: [Message {
+/// range: (..), ... }] ... }])` Debug dump that's a nightmare to
+/// scan. Wrapping every test's `evaluate` call with this gives the
+/// `failed to compile X:line:col: <human message>` form instead.
+///
+/// Mirrors `kcl_embed::render_diagnostics` for the Resolve/Evaluate
+/// variants and falls back to the plain Display for Internal (which
+/// is rare and already prints a useful message).
+fn evaluate_or_panic(ready: &kcl_embed::EmbeddedReady, args: EvaluateArgs) -> kcl_embed::EvaluateOutcome {
+    match ready.evaluate(args) {
+        Ok(outcome) => outcome,
+        Err(EvaluationError::Resolve(diags)) | Err(EvaluationError::Evaluate(diags)) => {
+            panic!("\n{}\n", render_diagnostics(&diags))
+        }
+        Err(e) => panic!("evaluate failed: {e}"),
+    }
+}
 
 /// Main source imports a registered module; the embedded VM resolves
 /// the import in-memory, the schema's default flows through, and the
@@ -661,8 +682,9 @@ fn lambda_param_no_shadow_works_under_embed() {
 #[test]
 fn mokkan_native_type_names_register_in_schemas() {
     let ready = Embedded::new().build();
-    let outcome = ready
-        .evaluate(EvaluateArgs {
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
             main_source: concat!(
                 "schema NetCfg:\n",
                 "    cidr_field?: cidr\n",
@@ -676,8 +698,8 @@ fn mokkan_native_type_names_register_in_schemas() {
             )
             .to_string(),
             ..EvaluateArgs::default()
-        })
-        .expect("schema with mokkan type names should parse cleanly");
+        },
+    );
 
     let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
     assert!(cfg.is_schema(), "cfg should be a schema instance");
@@ -691,8 +713,9 @@ fn mokkan_native_type_names_register_in_schemas() {
 #[test]
 fn mokkan_string_coercion_typed_inet_at_validation_time() {
     let ready = Embedded::new().build();
-    let outcome = ready
-        .evaluate(EvaluateArgs {
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
             main_source: concat!(
                 "schema NetCfg:\n",
                 "    cidr_field: cidr\n",
@@ -709,8 +732,8 @@ fn mokkan_string_coercion_typed_inet_at_validation_time() {
             )
             .to_string(),
             ..EvaluateArgs::default()
-        })
-        .expect("string-coercion should succeed for canonical values");
+        },
+    );
 
     let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
     let c = cfg.dict_get_value("cidr_field").unwrap();
@@ -755,6 +778,109 @@ fn mokkan_string_coercion_strict_cidr_rejects_host_bits_set() {
     );
 }
 
+/// F1.4 — PG-shaped algebra functions. Exercises every function
+/// in the package once against a known-canonical input to verify
+/// PG-documented behaviour. Splits across two main_sources to
+/// keep each readable; the test asserts every output rather than
+/// the schema shape.
+#[test]
+fn mokkan_net_algebra_pg_documented_behaviour() {
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "import mokkan.net\n",
+                "\n",
+                // Source inet: 10.0.5.1/24 — v4, host bits set,
+                // exactly the lenient-inet case from F1.3.
+                "addr_v4 = \"10.0.5.1/24\"\n",
+                "# Single-arg derivations.\n",
+                "bcast = net.broadcast(addr_v4)\n",
+                "host_ = net.host(addr_v4)\n",
+                "masklen_ = net.masklen(addr_v4)\n",
+                "netmask_ = net.netmask(addr_v4)\n",
+                "host_mask = net.hostmask(addr_v4)\n",
+                "network_ = net.network(addr_v4)\n",
+                "text_ = net.text(addr_v4)\n",
+                "family_ = net.family(addr_v4)\n",
+                "# abbrev: /24 not suppressed; /32 case below.\n",
+                "abbrev_24 = net.abbrev(addr_v4)\n",
+                "abbrev_32 = net.abbrev(\"10.0.5.1/32\")\n",
+                "# Binary ops.\n",
+                "set_mask = net.set_masklen(addr_v4, 16)\n",
+                "merge_ = net.inet_merge(\"10.0.0.0/24\", \"10.0.1.0/24\")\n",
+                "# Predicates.\n",
+                "contains_strict = net.contains(\"10.0.0.0/8\", \"10.0.5.0/24\")\n",
+                "contains_equal = net.contains(\"10.0.0.0/8\", \"10.0.0.0/8\")\n",
+                "contains_eq_ = net.contains_eq(\"10.0.0.0/8\", \"10.0.0.0/8\")\n",
+                "contained = net.contained_by(\"10.0.5.0/24\", \"10.0.0.0/8\")\n",
+                "overlap_yes = net.overlaps(\"10.0.0.0/8\", \"10.0.5.0/24\")\n",
+                "overlap_no = net.overlaps(\"10.0.0.0/8\", \"172.16.0.0/12\")\n",
+                "same_fam_yes = net.inet_same_family(\"10.0.0.1/24\", \"192.168.0.1/24\")\n",
+                "same_fam_no = net.inet_same_family(\"10.0.0.1/24\", \"fd00::1/64\")\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+
+    let v = &outcome.value;
+    // broadcast(10.0.5.1/24) = 10.0.5.255/24
+    assert_eq!(
+        format!("{}", v.dict_get_value("bcast").unwrap()),
+        "10.0.5.255/24"
+    );
+    // host: just the address, no masklen.
+    assert_eq!(v.dict_get_value("host_").unwrap().as_str(), "10.0.5.1");
+    assert_eq!(v.dict_get_value("masklen_").unwrap().as_int(), 24);
+    assert_eq!(
+        format!("{}", v.dict_get_value("netmask_").unwrap()),
+        "255.255.255.0/24"
+    );
+    assert_eq!(
+        format!("{}", v.dict_get_value("host_mask").unwrap()),
+        "0.0.0.255/24"
+    );
+    assert_eq!(
+        format!("{}", v.dict_get_value("network_").unwrap()),
+        "10.0.5.0/24"
+    );
+    assert_eq!(
+        v.dict_get_value("text_").unwrap().as_str(),
+        "10.0.5.1/24"
+    );
+    assert_eq!(format!("{}", v.dict_get_value("family_").unwrap()), "V4");
+    assert_eq!(
+        v.dict_get_value("abbrev_24").unwrap().as_str(),
+        "10.0.5.1/24"
+    );
+    // /32 suppresses to host form (no masklen).
+    assert_eq!(
+        v.dict_get_value("abbrev_32").unwrap().as_str(),
+        "10.0.5.1"
+    );
+    assert_eq!(
+        format!("{}", v.dict_get_value("set_mask").unwrap()),
+        "10.0.5.1/16"
+    );
+    // /24 + /24 adjacent = /23.
+    assert_eq!(
+        format!("{}", v.dict_get_value("merge_").unwrap()),
+        "10.0.0.0/23"
+    );
+    // Predicates.
+    assert!(v.dict_get_value("contains_strict").unwrap().as_bool());
+    // strict contains rejects equality.
+    assert!(!v.dict_get_value("contains_equal").unwrap().as_bool());
+    assert!(v.dict_get_value("contains_eq_").unwrap().as_bool());
+    assert!(v.dict_get_value("contained").unwrap().as_bool());
+    assert!(v.dict_get_value("overlap_yes").unwrap().as_bool());
+    assert!(!v.dict_get_value("overlap_no").unwrap().as_bool());
+    assert!(v.dict_get_value("same_fam_yes").unwrap().as_bool());
+    assert!(!v.dict_get_value("same_fam_no").unwrap().as_bool());
+}
+
 /// F1.4 — `mokkan.net` package registration. `import mokkan.net`
 /// binds `net` into scope (KCL leaf-binding); `net.V4` / `net.V6`
 /// surface as typed `IpFamily` values; `net.broadcast(inet)`
@@ -763,8 +889,9 @@ fn mokkan_string_coercion_strict_cidr_rejects_host_bits_set() {
 #[test]
 fn mokkan_net_package_v4_v6_constants_and_broadcast() {
     let ready = Embedded::new().build();
-    let outcome = ready
-        .evaluate(EvaluateArgs {
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
             main_source: concat!(
                 "import mokkan.net\n",
                 "\n",
@@ -781,8 +908,8 @@ fn mokkan_net_package_v4_v6_constants_and_broadcast() {
             )
             .to_string(),
             ..EvaluateArgs::default()
-        })
-        .expect("import mokkan.net + use of V4/V6/broadcast should evaluate cleanly");
+        },
+    );
 
     let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
     let fam_v4 = cfg.dict_get_value("fam_v4").unwrap();
@@ -801,8 +928,9 @@ fn mokkan_net_package_v4_v6_constants_and_broadcast() {
 #[test]
 fn mokkan_string_coercion_lenient_inet_accepts_host_bits_set() {
     let ready = Embedded::new().build();
-    let outcome = ready
-        .evaluate(EvaluateArgs {
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
             main_source: concat!(
                 "schema NetCfg:\n",
                 "    inet_field: inet\n",
@@ -813,8 +941,8 @@ fn mokkan_string_coercion_lenient_inet_accepts_host_bits_set() {
             )
             .to_string(),
             ..EvaluateArgs::default()
-        })
-        .expect("inet accepts host-bits-set strings (D8 lenient policy)");
+        },
+    );
 
     let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
     let i = cfg.dict_get_value("inet_field").unwrap();

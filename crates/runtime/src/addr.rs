@@ -191,9 +191,28 @@ pub fn kcl_get_fn_ptr_by_name(name: &str) -> u64 {
         "kcl_math_modf" => crate::kcl_math_modf as *const () as u64,
         "kcl_math_pow" => crate::kcl_math_pow as *const () as u64,
         "kcl_math_sqrt" => crate::kcl_math_sqrt as *const () as u64,
-        // F1.4: mokkan.net package. Function name mangling at
+        // F1.4: mokkan.net package — typed PostgreSQL-shaped inet
+        // algebra. Function name mangling at
         // mangle_system_module_func in sema/builtin/mod.rs.
+        // Alphabetized within the mokkan_net group.
+        "kcl_mokkan_net_abbrev" => crate::kcl_mokkan_net_abbrev as *const () as u64,
         "kcl_mokkan_net_broadcast" => crate::kcl_mokkan_net_broadcast as *const () as u64,
+        "kcl_mokkan_net_contained_by" => crate::kcl_mokkan_net_contained_by as *const () as u64,
+        "kcl_mokkan_net_contains" => crate::kcl_mokkan_net_contains as *const () as u64,
+        "kcl_mokkan_net_contains_eq" => crate::kcl_mokkan_net_contains_eq as *const () as u64,
+        "kcl_mokkan_net_family" => crate::kcl_mokkan_net_family as *const () as u64,
+        "kcl_mokkan_net_host" => crate::kcl_mokkan_net_host as *const () as u64,
+        "kcl_mokkan_net_hostmask" => crate::kcl_mokkan_net_hostmask as *const () as u64,
+        "kcl_mokkan_net_inet_merge" => crate::kcl_mokkan_net_inet_merge as *const () as u64,
+        "kcl_mokkan_net_inet_same_family" => {
+            crate::kcl_mokkan_net_inet_same_family as *const () as u64
+        }
+        "kcl_mokkan_net_masklen" => crate::kcl_mokkan_net_masklen as *const () as u64,
+        "kcl_mokkan_net_netmask" => crate::kcl_mokkan_net_netmask as *const () as u64,
+        "kcl_mokkan_net_network" => crate::kcl_mokkan_net_network as *const () as u64,
+        "kcl_mokkan_net_overlaps" => crate::kcl_mokkan_net_overlaps as *const () as u64,
+        "kcl_mokkan_net_set_masklen" => crate::kcl_mokkan_net_set_masklen as *const () as u64,
+        "kcl_mokkan_net_text" => crate::kcl_mokkan_net_text as *const () as u64,
         "kcl_net_CIDR_host" => crate::kcl_net_CIDR_host as *const () as u64,
         "kcl_net_CIDR_netmask" => crate::kcl_net_CIDR_netmask as *const () as u64,
         "kcl_net_CIDR_subnet" => crate::kcl_net_CIDR_subnet as *const () as u64,
