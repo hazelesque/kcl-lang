@@ -1208,6 +1208,89 @@ fn mokkan_typed_value_accessors_yield_typed_payloads() {
     assert_eq!(fam.as_ip_family(), kcl_runtime::IpFamily::V6);
 }
 
+/// F1.7+ — typed protocol-classification predicates on inet.
+/// Each is a thin wrapper around the corresponding std-net
+/// `Ipv4Addr` / `Ipv6Addr` method dispatched on family. Replaces
+/// upstream KCL's stringly-typed `is_*_IP` surface (which F1.7
+/// deleted along with the rest of the upstream `net` package).
+#[test]
+fn mokkan_net_classification_predicates_dispatch_on_family() {
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "import mokkan.net\n",
+                "\n",
+                "schema Cfg:\n",
+                // is_unspecified
+                "    unspec_v4: bool\n",
+                "    unspec_v4_false: bool\n",
+                "    unspec_v6: bool\n",
+                // is_loopback
+                "    loop_v4: bool\n",
+                "    loop_v4_false: bool\n",
+                "    loop_v6: bool\n",
+                // is_multicast
+                "    mcast_v4: bool\n",
+                "    mcast_v4_false: bool\n",
+                "    mcast_v6: bool\n",
+                // is_link_local
+                "    ll_v4: bool\n",
+                "    ll_v4_false: bool\n",
+                "    ll_v6: bool\n",
+                "\n",
+                "cfg = Cfg {\n",
+                "    unspec_v4 = net.is_unspecified(\"0.0.0.0/32\")\n",
+                "    unspec_v4_false = net.is_unspecified(\"10.0.0.1/24\")\n",
+                "    unspec_v6 = net.is_unspecified(\"::/128\")\n",
+                "    loop_v4 = net.is_loopback(\"127.0.0.5/8\")\n",
+                "    loop_v4_false = net.is_loopback(\"10.0.0.1/24\")\n",
+                "    loop_v6 = net.is_loopback(\"::1/128\")\n",
+                "    mcast_v4 = net.is_multicast(\"239.1.2.3/32\")\n",
+                "    mcast_v4_false = net.is_multicast(\"10.0.0.1/24\")\n",
+                "    mcast_v6 = net.is_multicast(\"ff02::1/128\")\n",
+                "    ll_v4 = net.is_link_local(\"169.254.42.42/16\")\n",
+                "    ll_v4_false = net.is_link_local(\"10.0.0.1/24\")\n",
+                "    ll_v6 = net.is_link_local(\"fe80::1/64\")\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+    let truthy = [
+        "unspec_v4",
+        "unspec_v6",
+        "loop_v4",
+        "loop_v6",
+        "mcast_v4",
+        "mcast_v6",
+        "ll_v4",
+        "ll_v6",
+    ];
+    for k in truthy {
+        assert!(
+            cfg.dict_get_value(k).unwrap().as_bool(),
+            "expected {k} to be true"
+        );
+    }
+    let falsy = [
+        "unspec_v4_false",
+        "loop_v4_false",
+        "mcast_v4_false",
+        "ll_v4_false",
+    ];
+    for k in falsy {
+        assert!(
+            !cfg.dict_get_value(k).unwrap().as_bool(),
+            "expected {k} to be false"
+        );
+    }
+}
+
 /// F1.7 — the three stringly-typed survivors from upstream KCL's
 /// deleted `net` package (`fqdn`, `split_host_port`,
 /// `join_host_port`) now live under `mokkan.net` per F1.4.bis.

@@ -442,6 +442,121 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_overlaps(
     ValueRef::bool(result).into_raw(ctx)
 }
 
+/// Internal: dispatch a unary `inet → bool` classifier to the
+/// appropriate std-net predicate per family. Used by the F1.7+
+/// classification predicates below; saves the same five-line
+/// `arg_as_inet` + match dance from being repeated.
+fn classify_inet<F4, F6>(inet: cidr::IpInet, v4: F4, v6: F6) -> bool
+where
+    F4: FnOnce(&std::net::Ipv4Addr) -> bool,
+    F6: FnOnce(&std::net::Ipv6Addr) -> bool,
+{
+    match inet.address() {
+        std::net::IpAddr::V4(a) => v4(&a),
+        std::net::IpAddr::V6(a) => v6(&a),
+    }
+}
+
+/// Mokkan `is_unspecified(inet) -> bool`: address is the
+/// "unspecified" sentinel for its family — `0.0.0.0` (v4) or
+/// `::` (v6). Replaces upstream KCL's stringly-typed
+/// `is_unspecified_IP`. Thin wrapper over std-net.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn kcl_mokkan_net_is_unspecified(
+    ctx: *mut kcl_context_t,
+    args: *const kcl_value_ref_t,
+    kwargs: *const kcl_value_ref_t,
+) -> *const kcl_value_ref_t {
+    let args = unsafe { ptr_as_ref(args) };
+    let kwargs = unsafe { ptr_as_ref(kwargs) };
+    let ctx = unsafe { mut_ptr_as_ref(ctx) };
+    let addr = get_call_arg(args, kwargs, 0, Some("addr"))
+        .unwrap_or_else(|| panic!("is_unspecified() missing required argument 'addr'"));
+    let inet = arg_as_inet(&addr, "is_unspecified", "addr");
+    let result = classify_inet(
+        inet,
+        std::net::Ipv4Addr::is_unspecified,
+        std::net::Ipv6Addr::is_unspecified,
+    );
+    ValueRef::bool(result).into_raw(ctx)
+}
+
+/// Mokkan `is_loopback(inet) -> bool`: address falls in
+/// `127.0.0.0/8` (v4) or equals `::1` (v6). Replaces upstream
+/// KCL's `is_loopback_IP`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn kcl_mokkan_net_is_loopback(
+    ctx: *mut kcl_context_t,
+    args: *const kcl_value_ref_t,
+    kwargs: *const kcl_value_ref_t,
+) -> *const kcl_value_ref_t {
+    let args = unsafe { ptr_as_ref(args) };
+    let kwargs = unsafe { ptr_as_ref(kwargs) };
+    let ctx = unsafe { mut_ptr_as_ref(ctx) };
+    let addr = get_call_arg(args, kwargs, 0, Some("addr"))
+        .unwrap_or_else(|| panic!("is_loopback() missing required argument 'addr'"));
+    let inet = arg_as_inet(&addr, "is_loopback", "addr");
+    let result = classify_inet(
+        inet,
+        std::net::Ipv4Addr::is_loopback,
+        std::net::Ipv6Addr::is_loopback,
+    );
+    ValueRef::bool(result).into_raw(ctx)
+}
+
+/// Mokkan `is_multicast(inet) -> bool`: address falls in
+/// `224.0.0.0/4` (v4) or `ff00::/8` (v6). Replaces upstream KCL's
+/// `is_multicast_IP`. The narrower upstream variants
+/// (`is_interface_local_multicast_IP`,
+/// `is_link_local_multicast_IP`) are deferred — add when a
+/// concrete homelab use case surfaces.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn kcl_mokkan_net_is_multicast(
+    ctx: *mut kcl_context_t,
+    args: *const kcl_value_ref_t,
+    kwargs: *const kcl_value_ref_t,
+) -> *const kcl_value_ref_t {
+    let args = unsafe { ptr_as_ref(args) };
+    let kwargs = unsafe { ptr_as_ref(kwargs) };
+    let ctx = unsafe { mut_ptr_as_ref(ctx) };
+    let addr = get_call_arg(args, kwargs, 0, Some("addr"))
+        .unwrap_or_else(|| panic!("is_multicast() missing required argument 'addr'"));
+    let inet = arg_as_inet(&addr, "is_multicast", "addr");
+    let result = classify_inet(
+        inet,
+        std::net::Ipv4Addr::is_multicast,
+        std::net::Ipv6Addr::is_multicast,
+    );
+    ValueRef::bool(result).into_raw(ctx)
+}
+
+/// Mokkan `is_link_local(inet) -> bool`: address falls in
+/// `169.254.0.0/16` (v4) or `fe80::/10` (v6 unicast link-local).
+/// Replaces upstream KCL's `is_link_local_unicast_IP` (the
+/// "unicast" qualifier was redundant — link-local-multicast is
+/// reachable via `is_multicast` if needed; the homelab use case
+/// is "is this an APIPA / SLAAC autoconfig address?", which
+/// link-local-unicast captures).
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn kcl_mokkan_net_is_link_local(
+    ctx: *mut kcl_context_t,
+    args: *const kcl_value_ref_t,
+    kwargs: *const kcl_value_ref_t,
+) -> *const kcl_value_ref_t {
+    let args = unsafe { ptr_as_ref(args) };
+    let kwargs = unsafe { ptr_as_ref(kwargs) };
+    let ctx = unsafe { mut_ptr_as_ref(ctx) };
+    let addr = get_call_arg(args, kwargs, 0, Some("addr"))
+        .unwrap_or_else(|| panic!("is_link_local() missing required argument 'addr'"));
+    let inet = arg_as_inet(&addr, "is_link_local", "addr");
+    let result = classify_inet(
+        inet,
+        std::net::Ipv4Addr::is_link_local,
+        std::net::Ipv6Addr::is_unicast_link_local,
+    );
+    ValueRef::bool(result).into_raw(ctx)
+}
+
 /// Mokkan `inet_same_family(inet, inet) -> bool`: do both inets
 /// have the same IP family?
 #[unsafe(no_mangle)]

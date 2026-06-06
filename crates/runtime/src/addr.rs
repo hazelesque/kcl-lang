@@ -208,6 +208,10 @@ pub fn kcl_get_fn_ptr_by_name(name: &str) -> u64 {
         "kcl_mokkan_net_inet_same_family" => {
             crate::kcl_mokkan_net_inet_same_family as *const () as u64
         }
+        "kcl_mokkan_net_is_link_local" => crate::kcl_mokkan_net_is_link_local as *const () as u64,
+        "kcl_mokkan_net_is_loopback" => crate::kcl_mokkan_net_is_loopback as *const () as u64,
+        "kcl_mokkan_net_is_multicast" => crate::kcl_mokkan_net_is_multicast as *const () as u64,
+        "kcl_mokkan_net_is_unspecified" => crate::kcl_mokkan_net_is_unspecified as *const () as u64,
         "kcl_mokkan_net_join_host_port" => crate::kcl_mokkan_net_join_host_port as *const () as u64,
         "kcl_mokkan_net_masklen" => crate::kcl_mokkan_net_masklen as *const () as u64,
         "kcl_mokkan_net_netmask" => crate::kcl_mokkan_net_netmask as *const () as u64,

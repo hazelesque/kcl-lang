@@ -2163,6 +2163,29 @@ register_mokkan_net_member! {
         Type::bool_ref(),
         r#"`inet_same_family(inet, inet)`: both addresses share the same IP family."#,
     )
+    // F1.7+: protocol-classification predicates on inet. Thin
+    // wrappers around std-net `Ipv4Addr` / `Ipv6Addr` predicates,
+    // dispatched on family. Replaces upstream KCL's stringly-typed
+    // `is_*_IP` surface (which was deleted in F1.7). The narrower
+    // upstream variants (`is_interface_local_multicast_IP`,
+    // `is_link_local_multicast_IP`, `is_global_unicast_IP`) are
+    // deferred — add when a concrete homelab use case surfaces.
+    is_unspecified => _mokkan_net_unary_inet(
+        Type::bool_ref(),
+        r#"`is_unspecified(inet)`: address is the family's "unspecified" sentinel (`0.0.0.0` / `::`)."#,
+    )
+    is_loopback => _mokkan_net_unary_inet(
+        Type::bool_ref(),
+        r#"`is_loopback(inet)`: address is in `127.0.0.0/8` (v4) or equals `::1` (v6)."#,
+    )
+    is_multicast => _mokkan_net_unary_inet(
+        Type::bool_ref(),
+        r#"`is_multicast(inet)`: address is in `224.0.0.0/4` (v4) or `ff00::/8` (v6)."#,
+    )
+    is_link_local => _mokkan_net_unary_inet(
+        Type::bool_ref(),
+        r#"`is_link_local(inet)`: address is in `169.254.0.0/16` (v4) or `fe80::/10` (v6 unicast link-local)."#,
+    )
     // F1.7: stringly-typed survivors from upstream KCL's deleted
     // `net` package (per F1.4.bis). Same signatures and behaviour
     // as upstream; available under `mokkan.net` until a typed
