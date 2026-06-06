@@ -220,15 +220,15 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_host(
         InetState::Resolved(inet) => {
             ValueRef::str(inet.address().to_string().as_ref()).into_raw(ctx)
         }
-        InetState::Symbolic(_) => {
-            // D4: symbolic host(inet) → ResolvableString carrying
-            // `Host(<inner>)`. F2.4 wires the ResolvableString carrier
-            // and the stringification dispatch; F2.2 panics explicitly
-            // so a regression doesn't fall through silently.
-            panic!(
-                "host(symbolic inet) deferred to F2.4 — needs ResolvableString \
-                 (`Segment::Symbolic(Host(<inner>))`)"
-            );
+        InetState::Symbolic(expr) => {
+            // F2.4 / D4: symbolic host(inet) → ResolvableString
+            // wrapping `Host(<inner>)`. The resolver evaluates the
+            // inner Expr to an inet then stringifies it via the
+            // host (no-masklen) rule at resolve time.
+            let rs = crate::value::ResolvableString::from_symbolic(crate::value::Expr::Host(
+                Box::new(expr),
+            ));
+            ValueRef::from(Value::resolvable_string_value(rs)).into_raw(ctx)
         }
     }
 }
@@ -249,14 +249,24 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_masklen(
         InetState::Resolved(inet) => ValueRef::int(i64::from(inet.network_length())).into_raw(ctx),
         InetState::Symbolic(_) => {
             // D4: symbolic masklen(inet) produces a symbolic int.
-            // Symbolic ints are usable only by `set_masklen` or by
-            // stringification (`text(<int>)`); we don't have a
-            // value-level carrier for them yet. F2.4 introduces
-            // ResolvableString which serves as the deferred-value
-            // wrapper for the masklen case.
+            // F2.4 wires text/host/abbrev to ResolvableString — but
+            // those carry stringified deferred values, and masklen
+            // returns int, not string. There's no value-level
+            // "symbolic int" carrier in the F2 plan; the operator
+            // either:
+            //   - reads masklen from the network's declaration
+            //     eagerly (`config.networks["<handle>"].size`), or
+            //   - composes via `text(masklen(...))` if a future F2
+            //     extension adds a deferred-int-stringification path
+            //     (not in scope today).
+            // Until a concrete use case crystallises the right
+            // shape, we panic with an actionable diagnostic rather
+            // than half-implement.
             panic!(
-                "masklen(symbolic inet) deferred to F2.4 — symbolic int carrier \
-                 (ResolvableString wrapping MaskLen(<inner>)) not yet wired"
+                "masklen() on symbolic inet: no value-level carrier for symbolic ints \
+                 in the F2 plan. Read masklen from the source network's `size` \
+                 declaration eagerly instead — e.g., \
+                 `config.networks[\"<handle>\"].size`."
             );
         }
     }
@@ -429,13 +439,14 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_text(
         .unwrap_or_else(|| panic!("text() missing required argument 'addr'"));
     match inet_state(&addr, "text", "addr") {
         InetState::Resolved(inet) => ValueRef::str(inet.to_string().as_ref()).into_raw(ctx),
-        InetState::Symbolic(_) => {
-            // D4: symbolic text(inet) → ResolvableString with
-            // `Segment::Symbolic(Text(<inner>))`. F2.4 wires it.
-            panic!(
-                "text(symbolic inet) deferred to F2.4 — needs ResolvableString \
-                 (`Segment::Symbolic(Text(<inner>))`)"
-            );
+        InetState::Symbolic(expr) => {
+            // F2.4 / D4: symbolic text(inet) → ResolvableString
+            // wrapping `Text(<inner>)`. Resolver evaluates inner
+            // then stringifies including masklen.
+            let rs = crate::value::ResolvableString::from_symbolic(crate::value::Expr::Text(
+                Box::new(expr),
+            ));
+            ValueRef::from(Value::resolvable_string_value(rs)).into_raw(ctx)
         }
     }
 }
@@ -467,13 +478,15 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_abbrev(
             };
             ValueRef::str(text.as_ref()).into_raw(ctx)
         }
-        InetState::Symbolic(_) => {
-            // D4: symbolic abbrev(inet) → ResolvableString with
-            // `Segment::Symbolic(Abbrev(<inner>))`. F2.4 wires it.
-            panic!(
-                "abbrev(symbolic inet) deferred to F2.4 — needs ResolvableString \
-                 (`Segment::Symbolic(Abbrev(<inner>))`)"
-            );
+        InetState::Symbolic(expr) => {
+            // F2.4 / D4: symbolic abbrev(inet) → ResolvableString
+            // wrapping `Abbrev(<inner>)`. Resolver evaluates inner
+            // then applies the abbrev suppression rule at resolve
+            // time.
+            let rs = crate::value::ResolvableString::from_symbolic(crate::value::Expr::Abbrev(
+                Box::new(expr),
+            ));
+            ValueRef::from(Value::resolvable_string_value(rs)).into_raw(ctx)
         }
     }
 }

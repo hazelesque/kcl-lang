@@ -40,6 +40,43 @@ impl ValueRef {
             (Value::str_value(a), Value::str_value(b)) => {
                 Self::str(format!("{}{}", *a, *b).as_ref())
             }
+            // F2.4: string concat with a ResolvableString operand
+            // produces a ResolvableString with the concatenated
+            // segment list. The string operand becomes a single
+            // Literal segment; existing ResolvableString segments
+            // are spliced in directly. ResolvableString + str:
+            // segments + Literal. str + ResolvableString: Literal +
+            // segments. RS + RS: segments + segments. The plan
+            // explicitly defers `str + inet/cidr` (resolved or
+            // symbolic) to operators using explicit
+            // `text(addr)` / `host(addr)` / `abbrev(addr)` — the
+            // implicit stringification rule (text? host? abbrev?)
+            // would surprise the operator more than the missing
+            // arm does.
+            (Value::str_value(a), Value::resolvable_string_value(b)) => {
+                let mut segs = Vec::with_capacity(b.segments.len() + 1);
+                segs.push(crate::value::Segment::Literal((*a).clone()));
+                segs.extend(b.segments.iter().cloned());
+                Self::from(Value::resolvable_string_value(
+                    crate::value::ResolvableString::from_segments(segs),
+                ))
+            }
+            (Value::resolvable_string_value(a), Value::str_value(b)) => {
+                let mut segs = Vec::with_capacity(a.segments.len() + 1);
+                segs.extend(a.segments.iter().cloned());
+                segs.push(crate::value::Segment::Literal((*b).clone()));
+                Self::from(Value::resolvable_string_value(
+                    crate::value::ResolvableString::from_segments(segs),
+                ))
+            }
+            (Value::resolvable_string_value(a), Value::resolvable_string_value(b)) => {
+                let mut segs = Vec::with_capacity(a.segments.len() + b.segments.len());
+                segs.extend(a.segments.iter().cloned());
+                segs.extend(b.segments.iter().cloned());
+                Self::from(Value::resolvable_string_value(
+                    crate::value::ResolvableString::from_segments(segs),
+                ))
+            }
             // Mokkan F1.5: inet + int / int + inet (offset arithmetic).
             // Preserves source masklen; overflow panics per
             // inet_add_offset. F2.2: symbolic operand → AddOffset
@@ -610,5 +647,125 @@ mod test_value_bin {
         let a = sym_inet();
         let b = sym_inet();
         let _ = a.bin_sub(&mut ctx, &b);
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // F2.4: string concat with ResolvableString.
+    // ────────────────────────────────────────────────────────────────
+
+    use crate::value::{ResolvableString, Segment};
+
+    const LITERAL_PREFIX: &str = "host-";
+    const LITERAL_SUFFIX: &str = "-fin";
+
+    /// Build a single-symbolic-segment ResolvableString as the stand-in
+    /// for the F2.4 stringification output (`text(symbolic_inet)`).
+    fn sym_rs() -> ValueRef {
+        let rs = ResolvableString::from_symbolic(Expr::Text(Box::new(Expr::HandleSubnet {
+            handle: HANDLE.to_string(),
+            size: Some(24),
+            family: Some(IpFamily::V4),
+        })));
+        ValueRef::from(Value::resolvable_string_value(rs))
+    }
+
+    fn assert_segments(v: &ValueRef, want: Vec<Segment>) {
+        let borrow = v.rc.borrow();
+        match &*borrow {
+            Value::resolvable_string_value(rs) => {
+                assert_eq!(rs.segments, want, "segment list mismatch");
+            }
+            _ => panic!("expected resolvable_string_value variant"),
+        }
+    }
+
+    /// F2.4: str + ResolvableString → ResolvableString with the str
+    /// as a Literal prefix segment followed by the RS's segments.
+    #[test]
+    fn str_plus_resolvable_string_prepends_literal() {
+        let mut ctx = Context::new();
+        let rs = sym_rs();
+        let result = ValueRef::str(LITERAL_PREFIX).bin_add(&mut ctx, &rs);
+        let inner_expr = Expr::Text(Box::new(Expr::HandleSubnet {
+            handle: HANDLE.to_string(),
+            size: Some(24),
+            family: Some(IpFamily::V4),
+        }));
+        assert_segments(
+            &result,
+            vec![
+                Segment::Literal(LITERAL_PREFIX.to_string()),
+                Segment::Symbolic(Box::new(inner_expr)),
+            ],
+        );
+    }
+
+    /// Mirror: ResolvableString + str → segments + Literal suffix.
+    #[test]
+    fn resolvable_string_plus_str_appends_literal() {
+        let mut ctx = Context::new();
+        let rs = sym_rs();
+        let result = rs.bin_add(&mut ctx, &ValueRef::str(LITERAL_SUFFIX));
+        let inner_expr = Expr::Text(Box::new(Expr::HandleSubnet {
+            handle: HANDLE.to_string(),
+            size: Some(24),
+            family: Some(IpFamily::V4),
+        }));
+        assert_segments(
+            &result,
+            vec![
+                Segment::Symbolic(Box::new(inner_expr)),
+                Segment::Literal(LITERAL_SUFFIX.to_string()),
+            ],
+        );
+    }
+
+    /// RS + RS → spliced segment list. Useful for composing multiple
+    /// symbolic fragments (e.g., from separate `text()` calls).
+    #[test]
+    fn resolvable_string_plus_resolvable_string_splices_segments() {
+        let mut ctx = Context::new();
+        let a = sym_rs();
+        let b = sym_rs();
+        let result = a.bin_add(&mut ctx, &b);
+        // Result should be 2 Symbolic segments — same shape repeated.
+        let borrow = result.rc.borrow();
+        match &*borrow {
+            Value::resolvable_string_value(rs) => {
+                assert_eq!(rs.segments.len(), 2, "expected 2 spliced segments");
+                assert!(
+                    matches!(&rs.segments[0], Segment::Symbolic(_)),
+                    "first segment should be Symbolic"
+                );
+                assert!(
+                    matches!(&rs.segments[1], Segment::Symbolic(_)),
+                    "second segment should be Symbolic"
+                );
+            }
+            _ => panic!("expected resolvable_string_value"),
+        }
+    }
+
+    /// Three-part concat: `LITERAL_PREFIX + symbolic + LITERAL_SUFFIX`
+    /// — the canonical multi-segment shape. Locks down left-
+    /// associativity producing `[Literal, Symbolic, Literal]`.
+    #[test]
+    fn three_part_concat_produces_literal_symbolic_literal() {
+        let mut ctx = Context::new();
+        let intermediate = ValueRef::str(LITERAL_PREFIX).bin_add(&mut ctx, &sym_rs());
+        let result = intermediate.bin_add(&mut ctx, &ValueRef::str(LITERAL_SUFFIX));
+        let inner_expr = Expr::Text(Box::new(Expr::HandleSubnet {
+            handle: HANDLE.to_string(),
+            size: Some(24),
+            family: Some(IpFamily::V4),
+        }));
+        assert_segments(
+            &result,
+            vec![
+                Segment::Literal(LITERAL_PREFIX.to_string()),
+                Segment::Symbolic(Box::new(inner_expr)),
+                Segment::Literal(LITERAL_SUFFIX.to_string()),
+            ],
+        );
     }
 }
