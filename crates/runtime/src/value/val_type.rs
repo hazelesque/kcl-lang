@@ -291,6 +291,25 @@ pub fn convert_collection_value(ctx: &mut Context, value: &ValueRef, tpe: &str) 
     if tpe.is_empty() || tpe == KCL_TYPE_ANY {
         return value.clone();
     }
+    // F1.3 / T1.1: str → mokkan inet/cidr/macaddr coercion. Runs
+    // *before* the non-collection early-return below because a `str`
+    // value isn't a collection but still needs transformation when
+    // the target is a mokkan type. Mirrors the parallel hook in
+    // `kcl_evaluator::ty::convert_collection_value`.
+    if let Some(coerced) = try_coerce_mokkan_inet(value, &tpe) {
+        return coerced;
+    }
+    // T1.1: dispatch unions *before* the non-collection early return,
+    // since union arms can include scalar-coercible types like
+    // `cidr` (e.g. T1.1's `cidr | ResolvableString` field). Without
+    // this, a bare str value to such a union short-circuits at the
+    // non-collection early return and never reaches per-arm
+    // coercion. Mirrors the same dispatch position in the evaluator
+    // path so both paths converge on the same answer.
+    if is_type_union(&tpe) {
+        let types = split_type_union(&tpe);
+        return convert_collection_value_with_union_types(ctx, value, &types);
+    }
     let is_collection = value.is_list() || value.is_dict();
     let invalid_match_dict = is_dict_type(&tpe) && !value.is_dict();
     let invalid_match_list = is_list_type(&tpe) && !value.is_list();
@@ -298,11 +317,7 @@ pub fn convert_collection_value(ctx: &mut Context, value: &ValueRef, tpe: &str) 
     if !is_collection || invalid_match {
         return value.clone();
     }
-    // Convert a value to union types e.g., {a: 1} => A | B
-    if is_type_union(&tpe) {
-        let types = split_type_union(&tpe);
-        convert_collection_value_with_union_types(ctx, value, &types)
-    } else if is_dict_type(&tpe) {
+    if is_dict_type(&tpe) {
         //let (key_tpe, value_tpe) = separate_kv(tpe);
         let (_, value_tpe) = separate_kv(&dereference_type(&tpe));
         let mut expected_dict = ValueRef::dict(None);
@@ -330,15 +345,13 @@ pub fn convert_collection_value(ctx: &mut Context, value: &ValueRef, tpe: &str) 
         expected_list
     } else if BUILTIN_TYPES.contains(&tpe.as_str()) {
         value.clone()
-    } else if let Some(coerced) = try_coerce_mokkan_inet(value, &tpe) {
-        // F1.3: str → cidr/inet/macaddr/macaddr8 coercion at
-        // schema-validation time. Strict for cidr (host bits must be
-        // zero) per D8; lenient for inet (host bits allowed; masklen
-        // optional). MAC accepts canonical EUI-48/EUI-64 text.
-        // IpFamily has no string coercion — operators write the
-        // `net.V4` / `net.V6` constant directly.
-        coerced
     } else {
+        // Note: F1.3 str → mokkan-inet coercion runs at the top of
+        // this function now (pre-early-return) so it fires for both
+        // scalar fields and union-arm-validation paths. The previous
+        // fallback branch here was dead code for the canonical
+        // single-arm case (handled above) and never reached for
+        // union arms (the union-arm dispatch happens upstream).
         let now_meta_info = ctx.panic_info.clone();
         let mut schema_type_name = if tpe.contains('.') {
             tpe.to_string()

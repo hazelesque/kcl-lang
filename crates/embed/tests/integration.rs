@@ -2285,3 +2285,35 @@ fn d4_matrix_err_rows() {
         d4_run_expect_err(case.id, &src, case.expect_substr);
     }
 }
+
+/// T1.1 reproducer: bare string literal in a `cidr | ResolvableString`
+/// field. The F1.3 str→cidr coercion should fire for the cidr arm,
+/// the same way it does for a plain `cidr` field.
+#[test]
+fn t1_union_cidr_or_resolvable_string_accepts_bare_str_literal() {
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "schema Net:\n",
+                "    c: cidr | ResolvableString\n",
+                "\n",
+                "cfg = Net {\n",
+                "    c = \"192.168.99.0/24\"\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+    let c = cfg.dict_get_value("c").expect("c");
+    assert_eq!(
+        c.type_str(),
+        "cidr",
+        "expected str→cidr coercion; got: {} ({c})",
+        c.type_str()
+    );
+    assert_eq!(format!("{c}"), "192.168.99.0/24");
+}

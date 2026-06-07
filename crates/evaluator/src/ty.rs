@@ -211,6 +211,16 @@ pub fn convert_collection_value(s: &Evaluator, value: &ValueRef, tpe: &str) -> V
     if let Some(coerced) = try_coerce_mokkan_inet(value, tpe) {
         return coerced;
     }
+    // T1.1: dispatch unions *before* the non-collection early return
+    // so scalar values reach per-arm coercion. A bare str value to a
+    // `cidr | ResolvableString` field must try the `cidr` arm's
+    // str→cidr coercion (F1.3) — without this it short-circuits at
+    // the early-return below. Mirrors the same dispatch position in
+    // the runtime path.
+    if is_type_union(tpe) {
+        let types = split_type_union(tpe);
+        return convert_collection_value_with_union_types(s, value, &types);
+    }
     let is_collection = value.is_list() || value.is_dict();
     let invalid_match_dict = is_dict_type(tpe) && !value.is_dict();
     let invalid_match_list = is_list_type(tpe) && !value.is_list();
@@ -218,11 +228,7 @@ pub fn convert_collection_value(s: &Evaluator, value: &ValueRef, tpe: &str) -> V
     if !is_collection || invalid_match {
         return value.clone();
     }
-    // Convert a value to union types e.g., {a: 1} => A | B
-    if is_type_union(tpe) {
-        let types = split_type_union(tpe);
-        convert_collection_value_with_union_types(s, value, &types)
-    } else if is_dict_type(tpe) {
+    if is_dict_type(tpe) {
         //let (key_tpe, value_tpe) = separate_kv(tpe);
         let (_, value_tpe) = separate_kv(&dereference_type(tpe));
         let mut expected_dict = ValueRef::dict(None);
