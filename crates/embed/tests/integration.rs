@@ -1700,3 +1700,588 @@ fn multi_segment_resolvable_string_accepted_in_str_arm() {
     let msg = cfg.dict_get_value("msg").unwrap();
     assert_eq!(msg.type_str(), "ResolvableString");
 }
+
+// ────────────────────────────────────────────────────────────────────
+// F2.8 — D4 propagation-matrix consolidation.
+//
+// One fixture per row of the D4 matrix (eager + symbolic + err cases).
+// Piecemeal coverage of individual operations lives in F2.1 / F2.2 /
+// F2.4 / F2.5 alongside the implementations; what this section gives
+// is a single-file replay of the whole matrix as code, so a future
+// refactor that quietly drops (say) the SetMasklen size-invalidation
+// or the D2 predicate-on-sym panic gets caught here rather than in a
+// downstream consumer surprise. Naming follows the matrix shape, not
+// the implementation file layout.
+//
+// Each case carries an `id` field used in `expect`/`assert!` messages
+// so a single failure names the offending row clearly.
+//
+// Pattern: top-level binding `r = <expr>` followed by reading
+// `outcome.value.dict_get_value("r")`. No schema wrapping; the
+// expression's eager return shape is what `type_str()` asserts. The
+// str→inet/cidr coercion at builtin-arg sites (the F1.3 surface
+// extended to runtime by `arg_as_inet` / `inet_state`) makes string
+// literals fine as operands — no `as inet` cast needed.
+// ────────────────────────────────────────────────────────────────────
+
+/// Shared KCL preamble for matrix tests: import the two mokkan
+/// packages so every case can mix eager + symbolic ops without
+/// re-declaring imports per case. The `lan` handle is referenced by
+/// the symbolic-side cases; the runtime accepts it because symbolic
+/// constructors only build IR (resolution against a network table is
+/// T4's job, not F2's).
+const D4_PREAMBLE: &str = concat!("import mokkan.net\n", "import mokkan.net_symbolic\n", "\n",);
+
+/// Build the harness source: preamble + top-level binding `r = ...`.
+fn d4_source(body: &str) -> String {
+    format!("{D4_PREAMBLE}r = {body}\n")
+}
+
+/// Common harness: evaluate the source, return the top-level `r`.
+fn d4_run(case_id: &str, source: &str) -> kcl_runtime::ValueRef {
+    let ready = Embedded::new().build();
+    let outcome = match ready.evaluate(EvaluateArgs {
+        main_source: source.to_string(),
+        ..EvaluateArgs::default()
+    }) {
+        Ok(o) => o,
+        Err(EvaluationError::Resolve(d)) | Err(EvaluationError::Evaluate(d)) => panic!(
+            "[{case_id}] evaluate failed:\n{}\nsource:\n{source}",
+            render_diagnostics(&d)
+        ),
+        Err(e) => panic!("[{case_id}] evaluate failed: {e}\nsource:\n{source}"),
+    };
+    outcome
+        .value
+        .dict_get_value("r")
+        .unwrap_or_else(|| panic!("[{case_id}] top-level `r` missing\nsource:\n{source}"))
+}
+
+/// Common harness for the err cells: evaluate, expect failure,
+/// assert that the rendered diagnostic carries the documented
+/// substring (locks in operator-facing diagnostic wording).
+fn d4_run_expect_err(case_id: &str, source: &str, expect_substr: &str) {
+    let ready = Embedded::new().build();
+    let err = ready
+        .evaluate(EvaluateArgs {
+            main_source: source.to_string(),
+            ..EvaluateArgs::default()
+        })
+        .expect_err(&format!(
+            "[{case_id}] expected evaluate to fail\nsource:\n{source}"
+        ));
+    let rendered = match err {
+        EvaluationError::Resolve(d) | EvaluationError::Evaluate(d) => render_diagnostics(&d),
+        other => format!("{other}"),
+    };
+    assert!(
+        rendered.contains(expect_substr),
+        "[{case_id}] diagnostic missing expected substring {expect_substr:?}; got:\n{rendered}"
+    );
+}
+
+struct EagerCase {
+    id: &'static str,
+    /// Body producing the eager value — `d4_source` wraps it as
+    /// `r = <body>`.
+    body: &'static str,
+    expect_type_str: &'static str,
+    /// Substrings expected in `format!("{r}")`. For fixed
+    /// integers/booleans this is the canonical text form; for
+    /// inet/cidr it's the `cidr` crate's Display.
+    expect_display_substrs: &'static [&'static str],
+}
+
+const EAGER_ROWS: &[EagerCase] = &[
+    // Derivations: inet → inet
+    EagerCase {
+        id: "broadcast(inet)→inet",
+        body: "net.broadcast(\"10.0.5.10/24\")",
+        expect_type_str: "inet",
+        expect_display_substrs: &["10.0.5.255/24"],
+    },
+    EagerCase {
+        id: "netmask(inet)→inet",
+        body: "net.netmask(\"10.0.5.10/24\")",
+        expect_type_str: "inet",
+        expect_display_substrs: &["255.255.255.0/24"],
+    },
+    EagerCase {
+        id: "hostmask(inet)→inet",
+        body: "net.hostmask(\"10.0.5.10/24\")",
+        expect_type_str: "inet",
+        expect_display_substrs: &["0.0.0.255/24"],
+    },
+    // Derivations: inet → str / int / cidr / IpFamily
+    EagerCase {
+        id: "host(inet)→str",
+        body: "net.host(\"10.0.5.10/24\")",
+        expect_type_str: "str",
+        expect_display_substrs: &["10.0.5.10"],
+    },
+    EagerCase {
+        id: "masklen(inet)→int",
+        body: "net.masklen(\"10.0.5.10/24\")",
+        expect_type_str: "int",
+        expect_display_substrs: &["24"],
+    },
+    EagerCase {
+        id: "network(inet)→cidr",
+        body: "net.network(\"10.0.5.10/24\")",
+        expect_type_str: "cidr",
+        expect_display_substrs: &["10.0.5.0/24"],
+    },
+    EagerCase {
+        id: "family(inet)→IpFamily(v4)",
+        body: "net.family(\"10.0.5.10/24\")",
+        expect_type_str: "IpFamily",
+        expect_display_substrs: &["V4"],
+    },
+    EagerCase {
+        id: "family(inet)→IpFamily(v6)",
+        body: "net.family(\"2001:db8::1/64\")",
+        expect_type_str: "IpFamily",
+        expect_display_substrs: &["V6"],
+    },
+    // Derivations: stringification + abbrev suppression rule
+    EagerCase {
+        id: "text(inet)→str",
+        body: "net.text(\"10.0.5.10/24\")",
+        expect_type_str: "str",
+        expect_display_substrs: &["10.0.5.10/24"],
+    },
+    EagerCase {
+        id: "abbrev(inet/32)→str_no_mask",
+        body: "net.abbrev(\"10.0.5.10/32\")",
+        expect_type_str: "str",
+        // /32 host-mask suppressed.
+        expect_display_substrs: &["10.0.5.10"],
+    },
+    EagerCase {
+        id: "abbrev(inet/24)→str_with_mask",
+        body: "net.abbrev(\"10.0.5.10/24\")",
+        expect_type_str: "str",
+        // /24 not host-mask, mask kept.
+        expect_display_substrs: &["10.0.5.10/24"],
+    },
+    // set_masklen: changes mask, address preserved
+    EagerCase {
+        id: "set_masklen(inet,/16)→inet",
+        body: "net.set_masklen(\"10.0.5.10/24\", 16)",
+        expect_type_str: "inet",
+        expect_display_substrs: &["10.0.5.10/16"],
+    },
+    // inet_merge: smallest cidr containing both
+    EagerCase {
+        id: "inet_merge(adjacent /25s)→/24",
+        body: "net.inet_merge(\"10.0.5.10/25\", \"10.0.5.140/25\")",
+        expect_type_str: "cidr",
+        expect_display_substrs: &["10.0.5.0/24"],
+    },
+    // Predicates (cidr,cidr)→bool
+    EagerCase {
+        id: "contains(outer,inner)→true",
+        body: "net.contains(\"10.0.0.0/16\", \"10.0.5.0/24\")",
+        expect_type_str: "bool",
+        expect_display_substrs: &["True"],
+    },
+    EagerCase {
+        id: "contains(eq,eq)→false_strict",
+        body: "net.contains(\"10.0.0.0/16\", \"10.0.0.0/16\")",
+        expect_type_str: "bool",
+        // Strict containment — equality is NOT contained.
+        expect_display_substrs: &["False"],
+    },
+    EagerCase {
+        id: "contains_eq(eq,eq)→true",
+        body: "net.contains_eq(\"10.0.0.0/16\", \"10.0.0.0/16\")",
+        expect_type_str: "bool",
+        expect_display_substrs: &["True"],
+    },
+    EagerCase {
+        id: "overlaps(disjoint)→false",
+        body: "net.overlaps(\"10.0.0.0/16\", \"10.1.0.0/16\")",
+        expect_type_str: "bool",
+        expect_display_substrs: &["False"],
+    },
+    EagerCase {
+        id: "inet_same_family(v4,v4)→true",
+        body: "net.inet_same_family(\"10.0.0.1/24\", \"192.168.1.1/24\")",
+        expect_type_str: "bool",
+        expect_display_substrs: &["True"],
+    },
+    EagerCase {
+        id: "inet_same_family(v4,v6)→false",
+        body: "net.inet_same_family(\"10.0.0.1/24\", \"2001:db8::1/64\")",
+        expect_type_str: "bool",
+        expect_display_substrs: &["False"],
+    },
+    // Classifiers (F1.7+ additions)
+    EagerCase {
+        id: "is_loopback(127.0.0.1)→true",
+        body: "net.is_loopback(\"127.0.0.1/32\")",
+        expect_type_str: "bool",
+        expect_display_substrs: &["True"],
+    },
+    EagerCase {
+        id: "is_link_local(169.254.x)→true",
+        body: "net.is_link_local(\"169.254.5.1/16\")",
+        expect_type_str: "bool",
+        expect_display_substrs: &["True"],
+    },
+];
+
+/// Eager rows: every algebra surface that's expected to produce a
+/// resolved value when all operands are resolved. The matrix's
+/// left-hand column.
+#[test]
+fn d4_matrix_eager_rows() {
+    for case in EAGER_ROWS {
+        let src = d4_source(case.body);
+        let r = d4_run(case.id, &src);
+        assert_eq!(
+            r.type_str(),
+            case.expect_type_str,
+            "[{}] type_str mismatch (source:\n{src})",
+            case.id,
+        );
+        let disp = format!("{r}");
+        for needle in case.expect_display_substrs {
+            assert!(
+                disp.contains(needle),
+                "[{}] display missing {needle:?}; got: {disp}",
+                case.id,
+            );
+        }
+    }
+}
+
+struct SymbolicCase {
+    id: &'static str,
+    body: &'static str,
+    expect_type_str: &'static str,
+    /// Substrings expected in the diagnostic Display of the
+    /// resulting symbolic value. The IR variant name(s) for the
+    /// outermost wrapper, plus "lan" so we catch handle-loss
+    /// regressions.
+    expect_display_substrs: &'static [&'static str],
+}
+
+const SYMBOLIC_ROWS: &[SymbolicCase] = &[
+    // Single-operand symbolic derivations producing a sym inet/cidr.
+    SymbolicCase {
+        id: "broadcast(sym inet)→sym inet via BroadcastOf",
+        body: "net.broadcast(net_symbolic.symbolic_inet(\"lan\", 0))",
+        expect_type_str: "inet",
+        expect_display_substrs: &["BroadcastOf", "HandleSubnet", "\"lan\""],
+    },
+    SymbolicCase {
+        id: "netmask(sym inet)→sym inet via NetmaskOf",
+        body: "net.netmask(net_symbolic.symbolic_inet(\"lan\", 0))",
+        expect_type_str: "inet",
+        expect_display_substrs: &["NetmaskOf", "HandleSubnet", "\"lan\""],
+    },
+    SymbolicCase {
+        id: "hostmask(sym inet)→sym inet via HostmaskOf",
+        body: "net.hostmask(net_symbolic.symbolic_inet(\"lan\", 0))",
+        expect_type_str: "inet",
+        expect_display_substrs: &["HostmaskOf", "HandleSubnet", "\"lan\""],
+    },
+    SymbolicCase {
+        id: "network(sym inet)→sym cidr via NetworkOf",
+        body: "net.network(net_symbolic.symbolic_inet(\"lan\", 5))",
+        expect_type_str: "cidr",
+        expect_display_substrs: &["NetworkOf", "HandleSubnet", "\"lan\""],
+    },
+    SymbolicCase {
+        // SetMasklen invalidates the source size annotation per D4 —
+        // post-op size is the SetMasklen literal, not the handle's
+        // declared size. The IR shape pins that: SetMasklen wraps
+        // HandleSubnet directly with a fresh LiteralInt.
+        id: "set_masklen(sym inet,/16)→sym inet via SetMasklen",
+        body: "net.set_masklen(net_symbolic.symbolic_inet(\"lan\", 0), 16)",
+        expect_type_str: "inet",
+        expect_display_substrs: &["SetMasklen", "HandleSubnet", "16"],
+    },
+    SymbolicCase {
+        id: "inet_merge(sym, sym)→sym cidr via InetMerge",
+        body: "net.inet_merge(net_symbolic.symbolic_inet(\"lan\", 0), net_symbolic.symbolic_inet(\"lan\", 128))",
+        expect_type_str: "cidr",
+        expect_display_substrs: &["InetMerge", "HandleSubnet"],
+    },
+    SymbolicCase {
+        // Mixed eager+symbolic: the eager operand lifts to LiteralInet
+        // inside InetMerge; the symbolic operand passes through.
+        id: "inet_merge(sym, eager)→sym cidr (mixed lift)",
+        body: "net.inet_merge(net_symbolic.symbolic_inet(\"lan\", 0), \"10.0.5.140/25\")",
+        expect_type_str: "cidr",
+        // LiteralInet for the eager arm + HandleSubnet for the sym arm,
+        // both inside InetMerge. Locks in inet_as_expr's lifting path.
+        expect_display_substrs: &["InetMerge", "LiteralInet", "HandleSubnet"],
+    },
+    SymbolicCase {
+        id: "inet_merge(eager, sym)→sym cidr (mixed lift)",
+        body: "net.inet_merge(\"10.0.5.10/25\", net_symbolic.symbolic_inet(\"lan\", 128))",
+        expect_type_str: "cidr",
+        expect_display_substrs: &["InetMerge", "LiteralInet", "HandleSubnet"],
+    },
+    // Operator overloads: arithmetic
+    SymbolicCase {
+        id: "sym inet+int→sym inet via AddOffset",
+        body: "net_symbolic.symbolic_inet(\"lan\", 0) + 10",
+        expect_type_str: "inet",
+        expect_display_substrs: &["AddOffset", "HandleSubnet", "10"],
+    },
+    SymbolicCase {
+        id: "sym inet-int→sym inet via SubOffset",
+        body: "net_symbolic.symbolic_inet(\"lan\", 0) - 3",
+        expect_type_str: "inet",
+        expect_display_substrs: &["SubOffset", "HandleSubnet", "3"],
+    },
+];
+
+/// Symbolic rows producing sym cidr / inet. Asserts both the typed
+/// shape (`type_str() == "inet"`/`"cidr"`) and the outermost IR
+/// variant name in the diagnostic Display — catches the
+/// "accidentally Resolved" and "wrong wrapper" regressions.
+#[test]
+fn d4_matrix_symbolic_rows() {
+    for case in SYMBOLIC_ROWS {
+        let src = d4_source(case.body);
+        let r = d4_run(case.id, &src);
+        assert_eq!(
+            r.type_str(),
+            case.expect_type_str,
+            "[{}] type_str mismatch; expected typed shape, got {}",
+            case.id,
+            r.type_str(),
+        );
+        let disp = format!("{r}");
+        // Symbolic values stringify as `<symbolic <ty>: <IR debug>>`.
+        // The "<symbolic" prefix is the F2.1 diagnostic shape.
+        assert!(
+            disp.starts_with("<symbolic"),
+            "[{}] expected diagnostic Display to start with '<symbolic'; got: {disp}",
+            case.id,
+        );
+        for needle in case.expect_display_substrs {
+            assert!(
+                disp.contains(needle),
+                "[{}] IR debug missing {needle:?}; got: {disp}",
+                case.id,
+            );
+        }
+    }
+}
+
+struct StringificationCase {
+    id: &'static str,
+    body: &'static str,
+    /// Which IR wrapper this stringification produces (Host / Text /
+    /// Abbrev). Pinned because a future refactor that swaps one for
+    /// another silently changes operator-facing resolution
+    /// semantics.
+    expect_ir_variant: &'static str,
+}
+
+const STRINGIFICATION_ROWS: &[StringificationCase] = &[
+    StringificationCase {
+        id: "host(sym inet)→ResolvableString via Host",
+        body: "net.host(net_symbolic.symbolic_inet(\"lan\", 10))",
+        expect_ir_variant: "Host",
+    },
+    StringificationCase {
+        id: "text(sym inet)→ResolvableString via Text",
+        body: "net.text(net_symbolic.symbolic_inet(\"lan\", 10))",
+        expect_ir_variant: "Text",
+    },
+    StringificationCase {
+        id: "abbrev(sym inet)→ResolvableString via Abbrev",
+        body: "net.abbrev(net_symbolic.symbolic_inet(\"lan\", 10))",
+        expect_ir_variant: "Abbrev",
+    },
+];
+
+/// Symbolic stringification cells of D4 — these all funnel into
+/// `ResolvableString` carrying a single Symbolic segment with the
+/// matching IR wrapper.
+#[test]
+fn d4_matrix_symbolic_stringification_rows() {
+    for case in STRINGIFICATION_ROWS {
+        let src = d4_source(case.body);
+        let r = d4_run(case.id, &src);
+        assert_eq!(
+            r.type_str(),
+            "ResolvableString",
+            "[{}] expected ResolvableString shape, got {}",
+            case.id,
+            r.type_str(),
+        );
+        let disp = format!("{r}");
+        // The diagnostic Display for a ResolvableString surfaces its
+        // segment list. The Symbolic segment's IR debug includes the
+        // wrapper variant name.
+        assert!(
+            disp.contains(case.expect_ir_variant),
+            "[{}] expected IR variant {:?} in Display; got: {disp}",
+            case.id,
+            case.expect_ir_variant,
+        );
+        assert!(
+            disp.contains("\"lan\""),
+            "[{}] expected handle name in IR; got: {disp}",
+            case.id,
+        );
+    }
+}
+
+struct ConcatCase {
+    id: &'static str,
+    body: &'static str,
+    /// Expected ordering of segment-kind markers in the concat
+    /// result. Locks in the segment construction order so a future
+    /// refactor that accidentally swaps left+right segments is caught.
+    expect_substrs_in_order: &'static [&'static str],
+}
+
+const CONCAT_ROWS: &[ConcatCase] = &[
+    ConcatCase {
+        // str + sym-stringification → ResolvableString with literal-
+        // first then symbolic segment.
+        id: "str + sym text→multi-segment RS",
+        body: "\"prefix-\" + net.text(net_symbolic.symbolic_inet(\"lan\", 10))",
+        expect_substrs_in_order: &["prefix-", "Text", "\"lan\""],
+    },
+    ConcatCase {
+        // sym-stringification + str → symbolic-first then literal.
+        id: "sym text + str→multi-segment RS",
+        body: "net.text(net_symbolic.symbolic_inet(\"lan\", 10)) + \"-suffix\"",
+        expect_substrs_in_order: &["Text", "\"lan\"", "-suffix"],
+    },
+];
+
+/// String concat preserves operand order in the ResolvableString
+/// segment list — `"a" + sym + "b"` is `[Literal("a"), Symbolic(sym),
+/// Literal("b")]`, not "all literals first" or any other shuffled
+/// shape. F2.4 wires this; F2.8 pins the contract.
+#[test]
+fn d4_matrix_concat_segment_order() {
+    for case in CONCAT_ROWS {
+        let src = d4_source(case.body);
+        let r = d4_run(case.id, &src);
+        assert_eq!(
+            r.type_str(),
+            "ResolvableString",
+            "[{}] expected ResolvableString; got {}",
+            case.id,
+            r.type_str(),
+        );
+        let disp = format!("{r}");
+        // Walk the expected substrings in order and verify each
+        // appears AFTER the previous. find() catches reorderings
+        // that .contains() would miss.
+        let mut cursor = 0usize;
+        for needle in case.expect_substrs_in_order {
+            let found = disp[cursor..].find(needle).unwrap_or_else(|| {
+                panic!(
+                    "[{}] missing {needle:?} after cursor {cursor}; got: {disp}",
+                    case.id,
+                )
+            });
+            cursor += found + needle.len();
+        }
+    }
+}
+
+struct ErrCase {
+    id: &'static str,
+    body: &'static str,
+    /// Documented substring in the runtime panic / diagnostic.
+    /// Locks in operator-facing wording.
+    expect_substr: &'static str,
+}
+
+const ERR_ROWS: &[ErrCase] = &[
+    // D4 explicit err: family(sym) — metadata query, not derivation.
+    ErrCase {
+        id: "family(sym inet) panics — metadata query",
+        body: "net.family(net_symbolic.symbolic_inet(\"lan\", 0))",
+        expect_substr: "family() on symbolic inet",
+    },
+    // F2 plan err: masklen(sym) — no symbolic-int carrier.
+    ErrCase {
+        id: "masklen(sym inet) panics — no sym-int carrier",
+        body: "net.masklen(net_symbolic.symbolic_inet(\"lan\", 0))",
+        expect_substr: "masklen() on symbolic inet",
+    },
+    // D2 structural rule: every cidr-cidr predicate panics on any
+    // symbolic operand. One row per predicate × one symbolic-operand
+    // position is enough — the panic site is the same `arg_as_cidr`
+    // helper for every predicate.
+    ErrCase {
+        id: "contains(sym cidr,...) panics — D2",
+        body: "net.contains(net_symbolic.symbolic_subnet(\"lan\", 24, net.V4), \"10.0.5.0/28\")",
+        expect_substr: "D2: symbolic mode is value-derivation only",
+    },
+    ErrCase {
+        id: "contains(...,sym cidr) panics — D2",
+        body: "net.contains(\"10.0.0.0/16\", net_symbolic.symbolic_subnet(\"lan\", 24, net.V4))",
+        expect_substr: "D2: symbolic mode is value-derivation only",
+    },
+    ErrCase {
+        id: "contained_by(sym,...) panics — D2",
+        body: "net.contained_by(net_symbolic.symbolic_subnet(\"lan\", 24, net.V4), \"10.0.0.0/16\")",
+        expect_substr: "D2: symbolic mode is value-derivation only",
+    },
+    ErrCase {
+        id: "contains_eq(sym,...) panics — D2",
+        body: "net.contains_eq(net_symbolic.symbolic_subnet(\"lan\", 24, net.V4), \"10.0.5.0/28\")",
+        expect_substr: "D2: symbolic mode is value-derivation only",
+    },
+    ErrCase {
+        id: "overlaps(sym,...) panics — D2",
+        body: "net.overlaps(net_symbolic.symbolic_subnet(\"lan\", 24, net.V4), \"10.0.0.0/16\")",
+        expect_substr: "D2: symbolic mode is value-derivation only",
+    },
+    ErrCase {
+        id: "inet_same_family(sym,...) panics — D2",
+        body: "net.inet_same_family(net_symbolic.symbolic_inet(\"lan\", 0), \"10.0.0.1/24\")",
+        expect_substr: "D2: symbolic mode is value-derivation only",
+    },
+    // Classifier predicates: same D2 rule applies. One row per
+    // classifier verifies the panic site is hooked up.
+    ErrCase {
+        id: "is_unspecified(sym) panics — D2",
+        body: "net.is_unspecified(net_symbolic.symbolic_inet(\"lan\", 0))",
+        expect_substr: "D2: symbolic mode is value-derivation only",
+    },
+    ErrCase {
+        id: "is_loopback(sym) panics — D2",
+        body: "net.is_loopback(net_symbolic.symbolic_inet(\"lan\", 0))",
+        expect_substr: "D2: symbolic mode is value-derivation only",
+    },
+    ErrCase {
+        id: "is_multicast(sym) panics — D2",
+        body: "net.is_multicast(net_symbolic.symbolic_inet(\"lan\", 0))",
+        expect_substr: "D2: symbolic mode is value-derivation only",
+    },
+    ErrCase {
+        id: "is_link_local(sym) panics — D2",
+        body: "net.is_link_local(net_symbolic.symbolic_inet(\"lan\", 0))",
+        expect_substr: "D2: symbolic mode is value-derivation only",
+    },
+];
+
+/// Err cells of D4: panics on symbolic operands for predicate /
+/// metadata operations. The fixture asserts both that evaluation
+/// fails AND that the diagnostic carries the documented
+/// rationale-anchor substring — so a future refactor that swallows
+/// the panic into a generic "evaluation failed" still trips this
+/// test.
+#[test]
+fn d4_matrix_err_rows() {
+    for case in ERR_ROWS {
+        let src = d4_source(case.body);
+        d4_run_expect_err(case.id, &src, case.expect_substr);
+    }
+}
