@@ -2279,6 +2279,76 @@ macro_rules! register_mokkan_net_symbolic_member {
     )
 }
 
+// ------------------------------
+// mokkan.uuid system package (Phase C.2)
+// ------------------------------
+//
+// UUID constructors:
+//   - `parse(s: str) -> uuid` — explicit str→uuid coercion.
+//   - `v5(namespace: uuid, name: str) -> uuid` — RFC 4122 §4.3
+//     deterministic UUID derivation.
+//
+// No `v4()` random-UUID builtin — random at evaluation time would
+// make Tilleyfile eval non-deterministic. Operators wanting random
+// UUIDs pass them in via external_args (the Tilley host_uuid path).
+
+pub const MOKKAN_UUID: &str = "mokkan.uuid";
+
+macro_rules! register_mokkan_uuid_member {
+    ($($name:ident => $ty:expr)*) => (
+        pub static MOKKAN_UUID_FUNCTION_TYPES: Lazy<IndexMap<String, Type>> = Lazy::new(|| {
+            let mut builtin_mapping = IndexMap::default();
+            $( builtin_mapping.insert(stringify!($name).to_string(), $ty); )*
+            builtin_mapping
+        });
+        pub const MOKKAN_UUID_FUNCTION_NAMES: &[&str] = &[
+            $( stringify!($name), )*
+        ];
+    )
+}
+
+register_mokkan_uuid_member! {
+    parse => Type::function(
+        None,
+        Type::uuid_ref(),
+        &[
+            Parameter {
+                name: "s".to_string(),
+                ty: Type::str_ref(),
+                has_default: false,
+                default_value: None,
+                range: dummy_range(),
+            },
+        ],
+        r#"Parse a hyphenated UUID string into a typed uuid value. Most schema authors don't need this — string literals in `uuid`-typed fields coerce automatically. Use this when the conversion happens mid-expression."#,
+        false,
+        None,
+    )
+    v5 => Type::function(
+        None,
+        Type::uuid_ref(),
+        &[
+            Parameter {
+                name: "namespace".to_string(),
+                ty: Type::uuid_ref(),
+                has_default: false,
+                default_value: None,
+                range: dummy_range(),
+            },
+            Parameter {
+                name: "name".to_string(),
+                ty: Type::str_ref(),
+                has_default: false,
+                default_value: None,
+                range: dummy_range(),
+            },
+        ],
+        r#"RFC 4122 §4.3 deterministic UUID derivation. Same namespace + name always produces the same output UUID."#,
+        false,
+        None,
+    )
+}
+
 register_mokkan_net_symbolic_member! {
     symbolic_subnet => Type::function(
         None,
@@ -2353,6 +2423,8 @@ pub const STANDARD_SYSTEM_MODULES: &[&str] = &[
     // F1.4 / F2.5: mokkan native packages. F1.7 removed upstream `NET`.
     MOKKAN_NET,
     MOKKAN_NET_SYMBOLIC,
+    // Phase C.2: UUID constructors (parse / v5).
+    MOKKAN_UUID,
 ];
 
 pub const STANDARD_SYSTEM_MODULE_NAMES_WITH_AT: &[&str] = &[
@@ -2375,6 +2447,8 @@ pub const STANDARD_SYSTEM_MODULE_NAMES_WITH_AT: &[&str] = &[
     "@mokkan.net",
     // F2.5: symbolic-primitive constructors.
     "@mokkan.net_symbolic",
+    // Phase C.2: UUID constructors.
+    "@mokkan.uuid",
 ];
 
 /// Get the system module members
@@ -2413,6 +2487,8 @@ pub fn get_system_module_members(name: &str) -> Vec<&str> {
         // constants from `mokkan.net`) as the `family` argument to
         // `symbolic_subnet`.
         MOKKAN_NET_SYMBOLIC => MOKKAN_NET_SYMBOLIC_FUNCTION_NAMES.to_vec(),
+        // Phase C.2: mokkan.uuid — parse + v5 only, no constants.
+        MOKKAN_UUID => MOKKAN_UUID_FUNCTION_NAMES.to_vec(),
         _ => bug!("invalid system module name '{}'", name),
     }
 }
@@ -2485,6 +2561,11 @@ pub fn get_system_member_function_ty(name: &str, func: &str) -> TypeRef {
         // F2.5: symbolic-primitive signatures.
         MOKKAN_NET_SYMBOLIC => {
             let types = &MOKKAN_NET_SYMBOLIC_FUNCTION_TYPES;
+            types.get(func).cloned()
+        }
+        // Phase C.2: uuid constructor signatures.
+        MOKKAN_UUID => {
+            let types = &MOKKAN_UUID_FUNCTION_TYPES;
             types.get(func).cloned()
         }
         _ => None,

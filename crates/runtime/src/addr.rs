@@ -229,6 +229,9 @@ pub fn kcl_get_fn_ptr_by_name(name: &str) -> u64 {
             crate::kcl_mokkan_net_symbolic_symbolic_subnet as *const () as u64
         }
         "kcl_mokkan_net_text" => crate::kcl_mokkan_net_text as *const () as u64,
+        // Phase C.2: mokkan.uuid builtins.
+        "kcl_mokkan_uuid_parse" => crate::kcl_mokkan_uuid_parse as *const () as u64,
+        "kcl_mokkan_uuid_v5" => crate::kcl_mokkan_uuid_v5 as *const () as u64,
         // F1.7: upstream `kcl_net_*` entries deleted — mokkan.net
         // is the sole networking surface. The three surviving
         // upstream functions (`fqdn`, `split_host_port`,

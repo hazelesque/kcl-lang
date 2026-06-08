@@ -880,6 +880,72 @@ fn mokkan_uuid_equality_via_canonical_value() {
     assert_eq!(same.as_bool(), true);
 }
 
+/// Phase C.2 — `mokkan.uuid.parse(s)` produces a typed
+/// `uuid_value` from a hyphenated UUID string. Equivalent to the
+/// F1.3 str→uuid coercion at schema-validation time, but available
+/// mid-expression (e.g., for building v5 namespace anchors from
+/// `option()`-supplied strings).
+#[test]
+fn mokkan_uuid_parse_builtin_constructs_typed_value() {
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "import mokkan.uuid\n",
+                "\n",
+                "ns = uuid.parse(\"0123abcd-4567-8910-1112-131415161718\")\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+    let ns = outcome.value.dict_get_value("ns").expect("ns");
+    assert_eq!(ns.type_str(), "uuid");
+    assert!(ns.is_uuid());
+    assert_eq!(
+        ns.as_uuid().to_string(),
+        "0123abcd-4567-8910-1112-131415161718"
+    );
+}
+
+/// Phase C.2 — `mokkan.uuid.v5(namespace, name)` produces a
+/// deterministic UUID via RFC 4122 §4.3. Same namespace + name
+/// always produces the same output; the load-bearing property for
+/// Tilley's `project_uuid` / `host_uuid` derivation paths.
+#[test]
+fn mokkan_uuid_v5_builtin_is_deterministic() {
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "import mokkan.uuid\n",
+                "\n",
+                "ns = uuid.parse(\"0123abcd-4567-8910-1112-131415161718\")\n",
+                "a = uuid.v5(ns, \"my-project\")\n",
+                "b = uuid.v5(ns, \"my-project\")\n",
+                "c = uuid.v5(ns, \"other-project\")\n",
+                "same = a == b\n",
+                "differ = a == c\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+    let same = outcome.value.dict_get_value("same").unwrap();
+    let differ = outcome.value.dict_get_value("differ").unwrap();
+    assert_eq!(same.as_bool(), true, "uuid.v5 should be deterministic");
+    assert_eq!(
+        differ.as_bool(),
+        false,
+        "distinct names should yield distinct uuids"
+    );
+    // a should also be a real uuid, not just compare-equal
+    let a = outcome.value.dict_get_value("a").unwrap();
+    assert!(a.is_uuid());
+}
+
 /// F1.4 — PG-shaped algebra functions. Exercises every function
 /// in the package once against a known-canonical input to verify
 /// PG-documented behaviour. Splits across two main_sources to

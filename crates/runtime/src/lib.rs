@@ -129,6 +129,13 @@ pub use self::mokkan_net::*;
 pub mod mokkan_net_symbolic;
 pub use self::mokkan_net_symbolic::*;
 
+// Phase C.2: mokkan.uuid — `uuid.parse(s)` + `uuid.v5(ns, name)`.
+// UUID constructors for cross-project namespace anchors. No `v4()`
+// builtin (random at eval time would break determinism); operators
+// pass random UUIDs in via external_args (Tilley's host_uuid path).
+pub mod mokkan_uuid;
+pub use self::mokkan_uuid::*;
+
 #[derive(Debug, Default, Clone)]
 pub struct RuntimePanicRecord {
     pub kcl_panic_info: bool,
