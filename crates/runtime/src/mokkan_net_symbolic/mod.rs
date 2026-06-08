@@ -76,16 +76,21 @@ fn arg_as_ip_family(value: &ValueRef, func: &str, arg: &str) -> crate::value::Ip
     }
 }
 
-/// Mokkan `symbolic_subnet(handle: str, size: int, family: IpFamily) -> cidr`.
+/// Mokkan `symbolic_subnet(handle: str) -> cidr`.
 ///
 /// Produces a symbolic `cidr_value` carrying a single
-/// `HandleSubnet { handle, size: Some(size), family: Some(family) }`
-/// leaf — both `Some(...)` per D3 because the operator asserted
-/// both values at the call site; the resolver validates both
-/// against the network's declaration at resolve time.
+/// `HandleSubnet { subnet_handle }` leaf. The resolver looks up
+/// size and family from the subnets side-table at resolve time.
 ///
-/// Family is required (per D6 / Hazel's "no v4 baked in forever"
-/// rule). Sema-level signature enforces it.
+/// Phase C.4 collapsed this surface (Rev 6 D3): Rev 5 also took
+/// `size: int` and `family: IpFamily` so the operator could
+/// assert them at the call site for validation. Rev 6 drops the
+/// assertion path entirely — the operator's declaration in
+/// `subnets = {...}` is the single source of truth, and the
+/// resolver doesn't need a duplicate value to compare against.
+/// The cost: typo catches at the symbolic_subnet call site go
+/// away; the benefit: simpler IR and one fewer place for
+/// operators to drift out of sync.
 ///
 /// # Safety
 /// C-ABI raw-pointer surface. Same contract as every other
@@ -102,35 +107,10 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_symbolic_symbolic_subnet(
 
     let handle_arg = get_call_arg(args, kwargs, 0, Some("handle"))
         .unwrap_or_else(|| panic!("symbolic_subnet() missing required argument 'handle'"));
-    let size_arg = get_call_arg(args, kwargs, 1, Some("size"))
-        .unwrap_or_else(|| panic!("symbolic_subnet() missing required argument 'size'"));
-    let family_arg = get_call_arg(args, kwargs, 2, Some("family"))
-        .unwrap_or_else(|| panic!("symbolic_subnet() missing required argument 'family'"));
-
     let handle = arg_as_handle_str(&handle_arg, "symbolic_subnet");
-    let size = arg_as_int(&size_arg, "symbolic_subnet", "size");
-    let family = arg_as_ip_family(&family_arg, "symbolic_subnet", "family");
-
-    // Range-check the size at the operator-facing point. v4 0..=32,
-    // v6 0..=128. The check is family-aware here because we have it
-    // eagerly; the matching range-check inside SetMasklen (F2.2)
-    // can't do this because Expr::HandleSubnet on its own doesn't
-    // carry the family at consumption time.
-    let max_mask = match family {
-        crate::value::IpFamily::V4 => 32,
-        crate::value::IpFamily::V6 => 128,
-    };
-    if size < 0 || size > max_mask {
-        panic!(
-            "symbolic_subnet() size {size} out of range for {family} \
-             (expected 0..={max_mask})"
-        );
-    }
 
     let expr = crate::value::Expr::HandleSubnet {
-        handle,
-        size: Some(size as u8),
-        family: Some(family),
+        subnet_handle: handle,
     };
     ValueRef::from(Value::cidr_value(crate::value::CidrValue::symbolic(expr))).into_raw(ctx)
 }
@@ -178,9 +158,7 @@ pub unsafe extern "C-unwind" fn kcl_mokkan_net_symbolic_symbolic_inet(
     // time when the family + size are known.
 
     let handle_expr = crate::value::Expr::HandleSubnet {
-        handle,
-        size: None,
-        family: None,
+        subnet_handle: handle,
     };
     let expr = crate::value::Expr::AddOffset(
         Box::new(crate::value::Expr::NetworkOf(Box::new(handle_expr))),
@@ -200,22 +178,20 @@ mod tests {
     //! C-ABI functions would produce — without needing the
     //! kcl_context_t plumbing.
 
-    use crate::value::{CidrInner, Expr, InetInner, IpFamily};
+    use crate::value::{CidrInner, Expr, InetInner};
 
-    const HANDLE: &str = "lan";
+    const HANDLE: &str = "lan_v4";
 
-    /// `symbolic_subnet("lan", 24, V4)` produces a HandleSubnet with
-    /// both Option fields Some(asserted-value). This is the load-
-    /// bearing D3 shape — the resolver later checks Some(asserted)
-    /// against the network's declaration.
+    /// `symbolic_subnet("lan_v4")` (Phase C.4) produces a
+    /// HandleSubnet carrying only the subnet_handle. The resolver
+    /// looks up size + family from the subnets side-table; the IR
+    /// doesn't carry them anymore (Rev 6 D3 collapse).
     #[test]
     fn symbolic_subnet_construction_shape() {
         // Mirror what kcl_mokkan_net_symbolic_symbolic_subnet builds
         // on its symbolic path, without going through C-ABI.
         let expr = Expr::HandleSubnet {
-            handle: HANDLE.to_string(),
-            size: Some(24),
-            family: Some(IpFamily::V4),
+            subnet_handle: HANDLE.to_string(),
         };
         let cv = crate::value::CidrValue::symbolic(expr.clone());
         assert!(cv.is_symbolic());
@@ -225,17 +201,14 @@ mod tests {
         }
     }
 
-    /// `symbolic_inet("lan", 10)` produces
-    /// `AddOffset(NetworkOf(HandleSubnet{None,None}), LiteralInt(10))`.
-    /// Both Option fields on the leaf are None because the call site
-    /// doesn't assert size or family; the resolver inherits both
-    /// from the handle's network declaration.
+    /// `symbolic_inet("lan_v4", 10)` produces
+    /// `AddOffset(NetworkOf(HandleSubnet{lan_v4}), LiteralInt(10))`.
+    /// The handle leaf carries just the subnet name; the resolver
+    /// looks up the rest from the subnets side-table.
     #[test]
     fn symbolic_inet_construction_shape() {
         let handle_expr = Expr::HandleSubnet {
-            handle: HANDLE.to_string(),
-            size: None,
-            family: None,
+            subnet_handle: HANDLE.to_string(),
         };
         let expr = Expr::AddOffset(
             Box::new(Expr::NetworkOf(Box::new(handle_expr))),

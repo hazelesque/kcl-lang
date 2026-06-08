@@ -173,18 +173,41 @@ pub fn inet_distance(a: cidr::IpInet, b: cidr::IpInet) -> i64 {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Expr {
     // ---- Leaves ---------------------------------------------------
-    /// The handle-shaped leaf: a reference to a named symbolic network
-    /// that the resolver will substitute at resolve time. `size` and
-    /// `family` are `Option<T>` so the IR can honestly distinguish
-    /// "operator asserted this value at the call site" (Some, resolver
-    /// validates against the network's declaration) from "operator
-    /// asserted nothing; inherit from the network" (None, resolver
-    /// looks it up without validation).
-    HandleSubnet {
-        handle: String,
-        size: Option<u8>,
-        family: Option<IpFamily>,
-    },
+    /// The handle-shaped leaf: a reference to a named symbolic subnet
+    /// that the resolver will substitute at resolve time. The
+    /// resolver looks up size + family from the subnets side-table
+    /// against the same handle.
+    ///
+    /// Phase C.4 collapsed this leaf per Rev 6 D3: Rev 5 carried
+    /// `size: Option<u8>` and `family: Option<IpFamily>` so the
+    /// operator could assert them at the call site for validation.
+    /// Rev 6 drops the assertion path entirely — the side-table is
+    /// the single source of truth, and the operator never needs to
+    /// restate values that already live in the `subnets = {...}`
+    /// declaration. The cost of the collapse: typo-at-call-site
+    /// catches go away; the benefit: the IR is simpler and
+    /// resolver eval has fewer branches.
+    HandleSubnet { subnet_handle: String },
+
+    /// VIP-shaped leaf: a reference to a named `NetworkAddress`
+    /// (Phase D consumer). Resolver looks up the IPAM-allocated
+    /// inet for the VIP at resolve time.
+    ///
+    /// Per Rev 6 D3-relaxed: a VIP is categorically distinct from
+    /// a subnet (no `size`, no `family`; it's just a key into the
+    /// IPAM *address* table, parent CIDR implicit). Composition
+    /// like `BroadcastOf(HandleAddress{...})` is semantically
+    /// nonsense — a VIP isn't a subnet — but the IR allows it; the
+    /// resolver surfaces a type error if the operator manages to
+    /// write such a composition.
+    ///
+    /// Phase C.4 adds the leaf shape. The synthesis API
+    /// (`kcl_embed::resolve::pending_address`) constructs values
+    /// carrying this leaf. The resolver's eval-path lights up in
+    /// Phase D when VIP allocation actually runs; for now the
+    /// Phase A→D loud guard at config-load time prevents VIP
+    /// declarations from reaching the resolver.
+    HandleAddress { vip_handle: String },
 
     /// Concrete cidr literal — produced when an eager value flows into
     /// an otherwise-symbolic expression (e.g.,
@@ -542,9 +565,7 @@ mod tests {
     #[test]
     fn cidr_value_symbolic_carries_expr() {
         let e = Expr::HandleSubnet {
-            handle: HANDLE.to_string(),
-            size: Some(24),
-            family: Some(IpFamily::V4),
+            subnet_handle: HANDLE.to_string(),
         };
         let cv = CidrValue::symbolic(e.clone());
         assert!(cv.is_symbolic());
@@ -562,9 +583,7 @@ mod tests {
     #[should_panic(expected = "D2 forbids deferred predicates")]
     fn cidr_value_expect_resolved_panics_on_symbolic() {
         let cv = CidrValue::symbolic(Expr::HandleSubnet {
-            handle: HANDLE.to_string(),
-            size: None,
-            family: None,
+            subnet_handle: HANDLE.to_string(),
         });
         let _ = cv.expect_resolved();
     }
@@ -584,9 +603,7 @@ mod tests {
         // caches) rely on all three. Lock them in.
         let a = Expr::AddOffset(
             Box::new(Expr::NetworkOf(Box::new(Expr::HandleSubnet {
-                handle: HANDLE.to_string(),
-                size: Some(24),
-                family: Some(IpFamily::V4),
+                subnet_handle: HANDLE.to_string(),
             }))),
             Box::new(Expr::LiteralInt(10)),
         );
@@ -625,9 +642,7 @@ mod tests {
     #[test]
     fn resolvable_string_from_symbolic_has_symbolic_not_literal() {
         let e = Expr::HandleSubnet {
-            handle: HANDLE.to_string(),
-            size: Some(24),
-            family: Some(IpFamily::V4),
+            subnet_handle: HANDLE.to_string(),
         };
         let rs = ResolvableString::from_symbolic(e);
         assert!(!rs.is_fully_literal());
@@ -645,9 +660,7 @@ mod tests {
     #[test]
     fn resolvable_string_multi_segment_concat_display() {
         let e = Expr::HandleSubnet {
-            handle: HANDLE.to_string(),
-            size: Some(24),
-            family: Some(IpFamily::V4),
+            subnet_handle: HANDLE.to_string(),
         };
         let rs = ResolvableString::from_segments(vec![
             Segment::Literal(LITERAL_PREFIX.to_string()),
@@ -668,9 +681,7 @@ mod tests {
     #[test]
     fn resolvable_string_round_trips_through_clone_and_eq() {
         let e = Expr::HandleSubnet {
-            handle: HANDLE.to_string(),
-            size: Some(24),
-            family: Some(IpFamily::V4),
+            subnet_handle: HANDLE.to_string(),
         };
         let a = *ResolvableString::from_segments(vec![
             Segment::Literal(LITERAL_PREFIX.to_string()),

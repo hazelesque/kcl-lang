@@ -135,34 +135,60 @@ impl<T> Resolvable<T> {
 // codegen-emitted Rust types, not KCL values.
 
 /// Synthesis-side: build a `Resolvable<T>::Pending` carrying a
-/// `HandleSubnet { handle, size: Some(size), family: Some(family) }`
-/// leaf. Mirrors `net_symbolic.symbolic_subnet` at the Rust-API
-/// level. Caller chooses T (typically `cidr::IpCidr` for a
+/// `HandleSubnet { subnet_handle }` leaf. Mirrors
+/// `net_symbolic.symbolic_subnet` at the Rust-API level. Caller
+/// chooses T (typically `cidr::IpCidr` for a
 /// `cidr | ResolvableString` field).
-pub fn pending_subnet<T>(handle: impl Into<String>, size: u8, family: IpFamily) -> Resolvable<T> {
+///
+/// Phase C.4 collapsed this signature: Rev 5 took `size` and
+/// `family` so the operator (or synthesizer) could assert them at
+/// the call site for resolver validation. Rev 6 drops the
+/// assertion path — the subnets side-table is the single source
+/// of truth. Callers that used to pass operator-declared
+/// `size` / `family` here can drop both arguments; the resolver
+/// looks them up from the same declaration the synthesizer reads
+/// (Tilley's `config.subnets[handle]`).
+pub fn pending_subnet<T>(subnet_handle: impl Into<String>) -> Resolvable<T> {
     let expr = Expr::HandleSubnet {
-        handle: handle.into(),
-        size: Some(size),
-        family: Some(family),
+        subnet_handle: subnet_handle.into(),
     };
     let rs = *ResolvableString::from_symbolic(expr);
     Resolvable::Pending(rs)
 }
 
 /// Synthesis-side: build a `Resolvable<T>::Pending` carrying
-/// `AddOffset(NetworkOf(HandleSubnet { handle, size: None, family:
-/// None }), LiteralInt(offset))`. Mirrors
-/// `net_symbolic.symbolic_inet` at the Rust-API level.
-pub fn pending_inet<T>(handle: impl Into<String>, offset: i64) -> Resolvable<T> {
+/// `AddOffset(NetworkOf(HandleSubnet { subnet_handle }),
+/// LiteralInt(offset))`. Mirrors `net_symbolic.symbolic_inet` at
+/// the Rust-API level.
+pub fn pending_inet<T>(subnet_handle: impl Into<String>, offset: i64) -> Resolvable<T> {
     let handle_expr = Expr::HandleSubnet {
-        handle: handle.into(),
-        size: None,
-        family: None,
+        subnet_handle: subnet_handle.into(),
     };
     let expr = Expr::AddOffset(
         Box::new(Expr::NetworkOf(Box::new(handle_expr))),
         Box::new(Expr::LiteralInt(offset)),
     );
+    let rs = *ResolvableString::from_symbolic(expr);
+    Resolvable::Pending(rs)
+}
+
+/// Synthesis-side: build a `Resolvable<T>::Pending` carrying a
+/// `HandleAddress { vip_handle }` leaf (Phase C.4). Mirrors
+/// `pending_subnet` but for VIP-shaped allocations: a single inet
+/// from an IPAM-managed parent subnet, addressed by the operator's
+/// `vips = {...}` dict key. The resolver looks up the allocated
+/// inet at resolve time.
+///
+/// Phase D consumer; the IR leaf and synthesis surface land here
+/// so Tilley's VIP-handling code (when it ships) can synthesize
+/// `Resolvable::Pending(...)` slots without further mokkan-side
+/// changes. The Phase A→D loud guard at config-load time
+/// prevents Tilleyfiles from reaching the resolver until Phase D
+/// proper.
+pub fn pending_address<T>(vip_handle: impl Into<String>) -> Resolvable<T> {
+    let expr = Expr::HandleAddress {
+        vip_handle: vip_handle.into(),
+    };
     let rs = *ResolvableString::from_symbolic(expr);
     Resolvable::Pending(rs)
 }
@@ -199,29 +225,24 @@ pub fn as_resolvable_string(value: &ValueRef) -> Option<ResolvableString> {
 mod tests {
     use super::*;
 
-    const HANDLE: &str = "lan";
+    const HANDLE: &str = "lan_v4";
+    const VIP_HANDLE: &str = "gateway_v4";
 
-    /// Synthesis path constructs a Pending Resolvable carrying a
-    /// HandleSubnet IR with both Option fields Some(asserted). The
-    /// resolver later checks Some(asserted) against the network's
-    /// declared values.
+    /// Phase C.4: synthesis path constructs a Pending Resolvable
+    /// carrying a HandleSubnet IR with only the subnet handle. The
+    /// resolver looks up size + family from the subnets side-table
+    /// at resolve time (Rev 6 D3 collapse).
     #[test]
-    fn pending_subnet_carries_handle_subnet_with_some_size_and_family() {
-        let r: Resolvable<cidr::IpCidr> = pending_subnet(HANDLE, 24, IpFamily::V4);
+    fn pending_subnet_carries_handle_subnet_with_handle_only() {
+        let r: Resolvable<cidr::IpCidr> = pending_subnet(HANDLE);
         assert!(r.is_pending());
         match r {
             Resolvable::Pending(rs) => {
                 assert_eq!(rs.segments.len(), 1, "single Symbolic segment expected");
                 match &rs.segments[0] {
                     Segment::Symbolic(e) => match e.as_ref() {
-                        Expr::HandleSubnet {
-                            handle,
-                            size,
-                            family,
-                        } => {
-                            assert_eq!(handle, HANDLE);
-                            assert_eq!(*size, Some(24));
-                            assert_eq!(*family, Some(IpFamily::V4));
+                        Expr::HandleSubnet { subnet_handle } => {
+                            assert_eq!(subnet_handle, HANDLE);
                         }
                         other => panic!("expected HandleSubnet, got {other:?}"),
                     },
@@ -233,9 +254,9 @@ mod tests {
     }
 
     /// Synthesis path for symbolic_inet builds
-    /// `AddOffset(NetworkOf(HandleSubnet{None,None}), LiteralInt(N))`
-    /// — both Option fields None on the leaf because the call site
-    /// asserted neither.
+    /// `AddOffset(NetworkOf(HandleSubnet{handle}), LiteralInt(N))`
+    /// — the handle leaf carries just the subnet name; size/family
+    /// come from the side-table.
     #[test]
     fn pending_inet_carries_addoffset_of_networkof_handle_subnet() {
         let r: Resolvable<cidr::IpInet> = pending_inet(HANDLE, 10);
@@ -246,14 +267,8 @@ mod tests {
                     Expr::AddOffset(net_box, lit_box) => {
                         match net_box.as_ref() {
                             Expr::NetworkOf(handle_box) => match handle_box.as_ref() {
-                                Expr::HandleSubnet {
-                                    handle,
-                                    size,
-                                    family,
-                                } => {
-                                    assert_eq!(handle, HANDLE);
-                                    assert_eq!(*size, None);
-                                    assert_eq!(*family, None);
+                                Expr::HandleSubnet { subnet_handle } => {
+                                    assert_eq!(subnet_handle, HANDLE);
                                 }
                                 other => panic!("expected HandleSubnet, got {other:?}"),
                             },
@@ -272,6 +287,30 @@ mod tests {
         }
     }
 
+    /// Phase C.4: `pending_address` builds a Pending Resolvable
+    /// carrying a single HandleAddress leaf. Mirror of
+    /// `pending_subnet` for VIPs.
+    #[test]
+    fn pending_address_carries_handle_address_leaf() {
+        let r: Resolvable<cidr::IpInet> = pending_address(VIP_HANDLE);
+        assert!(r.is_pending());
+        match r {
+            Resolvable::Pending(rs) => {
+                assert_eq!(rs.segments.len(), 1, "single Symbolic segment expected");
+                match &rs.segments[0] {
+                    Segment::Symbolic(e) => match e.as_ref() {
+                        Expr::HandleAddress { vip_handle } => {
+                            assert_eq!(vip_handle, VIP_HANDLE);
+                        }
+                        other => panic!("expected HandleAddress, got {other:?}"),
+                    },
+                    other => panic!("expected Symbolic segment, got {other:?}"),
+                }
+            }
+            Resolvable::Resolved(_) => panic!("expected Pending"),
+        }
+    }
+
     /// Generic-segment-list constructor preserves the operator-
     /// supplied segments verbatim — no normalisation, no
     /// re-shaping. Locks down the escape-hatch contract.
@@ -280,9 +319,7 @@ mod tests {
         let segs = vec![
             Segment::Literal("prefix-".to_string()),
             Segment::Symbolic(Box::new(Expr::HandleSubnet {
-                handle: HANDLE.to_string(),
-                size: None,
-                family: None,
+                subnet_handle: HANDLE.to_string(),
             })),
             Segment::Literal("-suffix".to_string()),
         ];

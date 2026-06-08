@@ -1136,9 +1136,7 @@ mod f2_2_dispatch_tests {
 
     fn sym_handle_expr() -> Expr {
         Expr::HandleSubnet {
-            handle: HANDLE.to_string(),
-            size: Some(24),
-            family: Some(IpFamily::V4),
+            subnet_handle: HANDLE.to_string(),
         }
     }
 

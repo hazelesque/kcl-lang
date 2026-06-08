@@ -556,9 +556,7 @@ mod test_value_bin {
     /// the operator-overload arms be tested before that wiring lands.
     fn sym_inet() -> ValueRef {
         let e = Expr::HandleSubnet {
-            handle: HANDLE.to_string(),
-            size: Some(24),
-            family: Some(IpFamily::V4),
+            subnet_handle: HANDLE.to_string(),
         };
         ValueRef::from(Value::inet_value(InetValue::symbolic(e)))
     }
@@ -586,9 +584,7 @@ mod test_value_bin {
             &result,
             Expr::AddOffset(
                 Box::new(Expr::HandleSubnet {
-                    handle: HANDLE.to_string(),
-                    size: Some(24),
-                    family: Some(IpFamily::V4),
+                    subnet_handle: HANDLE.to_string(),
                 }),
                 Box::new(Expr::LiteralInt(10)),
             ),
@@ -605,9 +601,7 @@ mod test_value_bin {
             &result,
             Expr::AddOffset(
                 Box::new(Expr::HandleSubnet {
-                    handle: HANDLE.to_string(),
-                    size: Some(24),
-                    family: Some(IpFamily::V4),
+                    subnet_handle: HANDLE.to_string(),
                 }),
                 Box::new(Expr::LiteralInt(10)),
             ),
@@ -627,9 +621,7 @@ mod test_value_bin {
             &result,
             Expr::SubOffset(
                 Box::new(Expr::HandleSubnet {
-                    handle: HANDLE.to_string(),
-                    size: Some(24),
-                    family: Some(IpFamily::V4),
+                    subnet_handle: HANDLE.to_string(),
                 }),
                 Box::new(Expr::LiteralInt(5)),
             ),
@@ -662,9 +654,7 @@ mod test_value_bin {
     /// for the F2.4 stringification output (`text(symbolic_inet)`).
     fn sym_rs() -> ValueRef {
         let rs = ResolvableString::from_symbolic(Expr::Text(Box::new(Expr::HandleSubnet {
-            handle: HANDLE.to_string(),
-            size: Some(24),
-            family: Some(IpFamily::V4),
+            subnet_handle: HANDLE.to_string(),
         })));
         ValueRef::from(Value::resolvable_string_value(rs))
     }
@@ -687,9 +677,7 @@ mod test_value_bin {
         let rs = sym_rs();
         let result = ValueRef::str(LITERAL_PREFIX).bin_add(&mut ctx, &rs);
         let inner_expr = Expr::Text(Box::new(Expr::HandleSubnet {
-            handle: HANDLE.to_string(),
-            size: Some(24),
-            family: Some(IpFamily::V4),
+            subnet_handle: HANDLE.to_string(),
         }));
         assert_segments(
             &result,
@@ -707,9 +695,7 @@ mod test_value_bin {
         let rs = sym_rs();
         let result = rs.bin_add(&mut ctx, &ValueRef::str(LITERAL_SUFFIX));
         let inner_expr = Expr::Text(Box::new(Expr::HandleSubnet {
-            handle: HANDLE.to_string(),
-            size: Some(24),
-            family: Some(IpFamily::V4),
+            subnet_handle: HANDLE.to_string(),
         }));
         assert_segments(
             &result,
@@ -755,9 +741,7 @@ mod test_value_bin {
         let intermediate = ValueRef::str(LITERAL_PREFIX).bin_add(&mut ctx, &sym_rs());
         let result = intermediate.bin_add(&mut ctx, &ValueRef::str(LITERAL_SUFFIX));
         let inner_expr = Expr::Text(Box::new(Expr::HandleSubnet {
-            handle: HANDLE.to_string(),
-            size: Some(24),
-            family: Some(IpFamily::V4),
+            subnet_handle: HANDLE.to_string(),
         }));
         assert_segments(
             &result,

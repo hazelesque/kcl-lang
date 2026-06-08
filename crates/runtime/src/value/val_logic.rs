@@ -131,9 +131,7 @@ mod test_value_logic {
 
         let sym = ValueRef::from(Value::resolvable_string_value(
             crate::value::ResolvableString::from_symbolic(crate::value::Expr::HandleSubnet {
-                handle: "lan".to_string(),
-                size: Some(24),
-                family: Some(crate::value::IpFamily::V4),
+                subnet_handle: "lan".to_string(),
             }),
         ));
         assert!(

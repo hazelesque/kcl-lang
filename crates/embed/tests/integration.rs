@@ -1547,6 +1547,10 @@ fn mokkan_upstream_net_import_path_is_dead() {
 /// goes through the F2.1 `CidrValue` diagnostic format — operator-
 /// facing stringification flows through the F2.4 ResolvableString
 /// path instead.
+///
+/// Phase C.4 collapsed the call surface: `symbolic_subnet` now
+/// takes just a subnet handle (Rev 6 D3 — size and family come
+/// from the subnets side-table at resolve time).
 #[test]
 fn mokkan_net_symbolic_subnet_constructs_symbolic_cidr() {
     let ready = Embedded::new().build();
@@ -1554,17 +1558,13 @@ fn mokkan_net_symbolic_subnet_constructs_symbolic_cidr() {
         &ready,
         EvaluateArgs {
             main_source: concat!(
-                "import mokkan.net\n",
                 "import mokkan.net_symbolic\n",
                 "\n",
                 "schema NetCfg:\n",
                 "    s: cidr\n",
                 "\n",
-                // Operator-facing call: `symbolic_subnet(handle, size,
-                // family)` with family required (D6 "no v4 baked in
-                // forever").
                 "cfg = NetCfg {\n",
-                "    s = net_symbolic.symbolic_subnet(\"lan\", 24, net.V4)\n",
+                "    s = net_symbolic.symbolic_subnet(\"lan_v4\")\n",
                 "}\n",
             )
             .to_string(),
@@ -1581,11 +1581,11 @@ fn mokkan_net_symbolic_subnet_constructs_symbolic_cidr() {
         "F2.1 diagnostic Display for symbolic cidr, got: {disp}"
     );
     // The IR snippet should mention the handle so the diagnostic
-    // points at the named network — locks in the debug shape so a
+    // points at the named subnet — locks in the debug shape so a
     // regression that loses the handle is caught here.
     assert!(
-        disp.contains("\"lan\""),
-        "diagnostic should name the handle, got: {disp}"
+        disp.contains("\"lan_v4\""),
+        "diagnostic should name the subnet handle, got: {disp}"
     );
 }
 
@@ -1682,7 +1682,12 @@ fn symbolic_inet_then_net_broadcast_wraps_in_broadcastof() {
 /// before the runtime sees it. Locks in the D6 "no v4 baked in
 /// forever" rule: family is structurally required.
 #[test]
-fn symbolic_subnet_rejects_string_family_at_resolve_time() {
+fn symbolic_subnet_rejects_extra_args_at_resolve_time() {
+    // Phase C.4: symbolic_subnet now takes a single str handle.
+    // Passing extra args fails the sema-level arity check before
+    // the runtime sees the call. (Rev 5's "string in family slot"
+    // test moot — there is no family slot anymore; the family
+    // comes from the subnets side-table at resolve time.)
     let ready = Embedded::new().build();
     let err = ready
         .evaluate(EvaluateArgs {
@@ -1693,16 +1698,13 @@ fn symbolic_subnet_rejects_string_family_at_resolve_time() {
                 "    s: cidr\n",
                 "\n",
                 "cfg = NetCfg {\n",
-                "    s = net_symbolic.symbolic_subnet(\"lan\", 24, \"V4\")\n",
+                "    s = net_symbolic.symbolic_subnet(\"lan_v4\", 24)\n",
                 "}\n",
             )
             .to_string(),
             ..EvaluateArgs::default()
         })
-        .expect_err("string family should fail type check");
-    // Any of Resolve/Evaluate is acceptable — the exact stage may
-    // shift as sema/evaluator coverage tightens; what matters is
-    // that a string in the family slot doesn't silently work.
+        .expect_err("extra positional arg should fail sema arity check");
     match err {
         EvaluationError::Resolve(_) | EvaluationError::Evaluate(_) => {}
         other => panic!("expected Resolve/Evaluate error, got: {other:?}"),
@@ -2381,27 +2383,27 @@ const ERR_ROWS: &[ErrCase] = &[
     // helper for every predicate.
     ErrCase {
         id: "contains(sym cidr,...) panics — D2",
-        body: "net.contains(net_symbolic.symbolic_subnet(\"lan\", 24, net.V4), \"10.0.5.0/28\")",
+        body: "net.contains(net_symbolic.symbolic_subnet(\"lan_v4\"), \"10.0.5.0/28\")",
         expect_substr: "D2: symbolic mode is value-derivation only",
     },
     ErrCase {
         id: "contains(...,sym cidr) panics — D2",
-        body: "net.contains(\"10.0.0.0/16\", net_symbolic.symbolic_subnet(\"lan\", 24, net.V4))",
+        body: "net.contains(\"10.0.0.0/16\", net_symbolic.symbolic_subnet(\"lan_v4\"))",
         expect_substr: "D2: symbolic mode is value-derivation only",
     },
     ErrCase {
         id: "contained_by(sym,...) panics — D2",
-        body: "net.contained_by(net_symbolic.symbolic_subnet(\"lan\", 24, net.V4), \"10.0.0.0/16\")",
+        body: "net.contained_by(net_symbolic.symbolic_subnet(\"lan_v4\"), \"10.0.0.0/16\")",
         expect_substr: "D2: symbolic mode is value-derivation only",
     },
     ErrCase {
         id: "contains_eq(sym,...) panics — D2",
-        body: "net.contains_eq(net_symbolic.symbolic_subnet(\"lan\", 24, net.V4), \"10.0.5.0/28\")",
+        body: "net.contains_eq(net_symbolic.symbolic_subnet(\"lan_v4\"), \"10.0.5.0/28\")",
         expect_substr: "D2: symbolic mode is value-derivation only",
     },
     ErrCase {
         id: "overlaps(sym,...) panics — D2",
-        body: "net.overlaps(net_symbolic.symbolic_subnet(\"lan\", 24, net.V4), \"10.0.0.0/16\")",
+        body: "net.overlaps(net_symbolic.symbolic_subnet(\"lan_v4\"), \"10.0.0.0/16\")",
         expect_substr: "D2: symbolic mode is value-derivation only",
     },
     ErrCase {

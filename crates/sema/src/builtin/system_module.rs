@@ -2361,22 +2361,8 @@ register_mokkan_net_symbolic_member! {
                 default_value: None,
                 range: dummy_range(),
             },
-            Parameter {
-                name: "size".to_string(),
-                ty: Type::int_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
-            Parameter {
-                name: "family".to_string(),
-                ty: Type::ip_family_ref(),
-                has_default: false,
-                default_value: None,
-                range: dummy_range(),
-            },
         ],
-        r#"Construct a symbolic cidr referring to a named handle. Family is required (no v4 baked in forever); the resolver validates size and family against the handle's network declaration."#,
+        r#"Construct a symbolic cidr referring to a named subnet handle. The resolver looks up size and family from the subnets side-table; the IR doesn't carry them anymore (Phase C.4 collapse, Rev 6 D3)."#,
         false,
         None,
     )
