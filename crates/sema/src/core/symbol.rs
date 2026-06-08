@@ -410,6 +410,7 @@ impl SymbolData {
             TypeKind::Macaddr => None,
             TypeKind::Macaddr8 => None,
             TypeKind::IpFamily => None,
+            TypeKind::Uuid => None,
             TypeKind::ResolvableString => None,
         }
     }
@@ -486,6 +487,7 @@ impl SymbolData {
             | TypeKind::Macaddr
             | TypeKind::Macaddr8
             | TypeKind::IpFamily
+            | TypeKind::Uuid
             | TypeKind::ResolvableString => vec![],
         }
     }
@@ -540,6 +542,7 @@ impl SymbolData {
             | TypeKind::Macaddr
             | TypeKind::Macaddr8
             | TypeKind::IpFamily
+            | TypeKind::Uuid
             | TypeKind::ResolvableString => None,
         }
     }

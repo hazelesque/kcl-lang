@@ -31,7 +31,11 @@ pub fn subsume(ty_lhs: TypeRef, ty_rhs: TypeRef, check_left_any: bool) -> bool {
     } else if ty_lhs.is_int() && ty_rhs.is_float() {
         true
     } else if ty_lhs.is_str()
-        && (ty_rhs.is_cidr() || ty_rhs.is_inet() || ty_rhs.is_macaddr() || ty_rhs.is_macaddr8())
+        && (ty_rhs.is_cidr()
+            || ty_rhs.is_inet()
+            || ty_rhs.is_macaddr()
+            || ty_rhs.is_macaddr8()
+            || ty_rhs.is_uuid())
     {
         // F1.3: str → mokkan inet types is assignable. Runtime
         // coercion in `convert_collection_value` parses the string
@@ -40,6 +44,7 @@ pub fn subsume(ty_lhs: TypeRef, ty_rhs: TypeRef, check_left_any: bool) -> bool {
         // IpFamily deliberately omitted — operators write the
         // `mokkan.net.V4` / `net.V6` constants directly, no string
         // form is parsed.
+        // Phase C.1: uuid added; standard hyphenated UUID text.
         //
         // The `is_str` predicate above covers both `Str` and
         // `StrLit("...")` because both carry the STR flag (see

@@ -559,6 +559,8 @@ impl ValueRef {
             crate::Value::macaddr_value(v) => JsonValue::String(v.to_string()),
             crate::Value::macaddr8_value(v) => JsonValue::String(v.to_string()),
             crate::Value::ip_family_value(v) => JsonValue::String(v.to_string()),
+            // Phase C.1: uuid as canonical hyphenated text.
+            crate::Value::uuid_value(v) => JsonValue::String(v.to_string()),
             // F2.3: a ResolvableString in eager JSON output is a
             // diagnostic-only encoding — the Display impl
             // concatenates literal segments and renders symbolic

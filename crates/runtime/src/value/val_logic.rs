@@ -27,6 +27,10 @@ impl ValueRef {
             Value::macaddr_value(_) => true,
             Value::macaddr8_value(_) => true,
             Value::ip_family_value(_) => true,
+            // Phase C.1: UUID always truthy — same shape as other
+            // primitive payloads. The all-zero (nil) UUID is still
+            // a value, not "empty".
+            Value::uuid_value(_) => true,
             // F2.3: truthy by "is there any segment". Empty segment
             // list is falsy (matches str's "empty is falsy" rule);
             // any non-empty segment list — even purely-symbolic that

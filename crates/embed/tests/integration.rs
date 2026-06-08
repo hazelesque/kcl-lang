@@ -785,6 +785,101 @@ fn mokkan_string_coercion_strict_cidr_rejects_host_bits_set() {
     );
 }
 
+/// Phase C.1 — `uuid` registers as a mokkan built-in named type
+/// alongside `cidr`/`inet`/`macaddr`/`macaddr8`/`IpFamily`. A
+/// schema field typed `uuid` accepts a hyphenated UUID string at
+/// schema-validation time (str→uuid coercion), and the resulting
+/// value carries the `uuid_value` runtime variant.
+#[test]
+fn mokkan_uuid_string_coercion_at_validation_time() {
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "schema NsCfg:\n",
+                "    handle: uuid\n",
+                "\n",
+                "cfg = NsCfg {\n",
+                "    handle = \"0123abcd-4567-8910-1112-131415161718\"\n",
+                "}\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+
+    let cfg = outcome.value.dict_get_value("cfg").expect("cfg");
+    let h = cfg.dict_get_value("handle").unwrap();
+    assert_eq!(h.type_str(), "uuid");
+    assert!(h.is_uuid(), "handle should carry a typed uuid_value");
+    // Canonical lowercase hyphenated text via the uuid crate's
+    // Display impl — round-tripping the operator-supplied form.
+    assert_eq!(
+        h.as_uuid().to_string(),
+        "0123abcd-4567-8910-1112-131415161718"
+    );
+}
+
+/// Phase C.1 — malformed UUID strings fail the str→uuid coercion;
+/// the field-validation path keeps the original str value and
+/// `check_type` rejects it with "expect uuid, got str", same shape
+/// as the cidr / macaddr coercion errors.
+#[test]
+fn mokkan_uuid_string_coercion_rejects_malformed() {
+    let ready = Embedded::new().build();
+    let result = ready.evaluate(EvaluateArgs {
+        main_source: concat!(
+            "schema NsCfg:\n",
+            "    handle: uuid\n",
+            "\n",
+            // Missing hyphen segment — uuid::Uuid::parse_str rejects.
+            "cfg = NsCfg {\n",
+            "    handle = \"not-a-uuid\"\n",
+            "}\n",
+        )
+        .to_string(),
+        ..EvaluateArgs::default()
+    });
+    let err = result.expect_err("malformed uuid should fail validation");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("uuid") && (msg.contains("str") || msg.contains("expect")),
+        "error should mention uuid / str mismatch; got: {msg}"
+    );
+}
+
+/// Phase C.1 — uuid values compare for equality via byte-equality
+/// on the underlying 128-bit array. `==` on two coerced uuids
+/// with the same canonical text returns True.
+#[test]
+fn mokkan_uuid_equality_via_canonical_value() {
+    let ready = Embedded::new().build();
+    let outcome = evaluate_or_panic(
+        &ready,
+        EvaluateArgs {
+            main_source: concat!(
+                "schema NsCfg:\n",
+                "    a: uuid\n",
+                "    b: uuid\n",
+                "\n",
+                "cfg = NsCfg {\n",
+                "    a = \"0123abcd-4567-8910-1112-131415161718\"\n",
+                // Same UUID, mixed-case hex — canonical comparison
+                // is case-insensitive on the parse side, lowercase
+                // on the Display side.
+                "    b = \"0123ABCD-4567-8910-1112-131415161718\"\n",
+                "}\n",
+                "same = cfg.a == cfg.b\n",
+            )
+            .to_string(),
+            ..EvaluateArgs::default()
+        },
+    );
+    let same = outcome.value.dict_get_value("same").unwrap();
+    assert_eq!(same.as_bool(), true);
+}
+
 /// F1.4 — PG-shaped algebra functions. Exercises every function
 /// in the package once against a known-canonical input to verify
 /// PG-documented behaviour. Splits across two main_sources to

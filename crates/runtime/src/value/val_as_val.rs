@@ -112,6 +112,19 @@ impl ValueRef {
         }
     }
 
+    /// Phase C.1: extract a `uuid::Uuid`. `Uuid` is `Copy` so we
+    /// hand back by value, mirroring the macaddr / ip_family
+    /// accessors. Panics on shape mismatch — codegen-side
+    /// type-checking is supposed to prevent this from being called
+    /// on the wrong variant.
+    #[inline]
+    pub fn as_uuid(&self) -> uuid::Uuid {
+        match &*self.rc.borrow() {
+            Value::uuid_value(v) => *v,
+            _ => panic!("invalid uuid value"),
+        }
+    }
+
     #[inline]
     pub fn as_list_ref(&self) -> Ref<'_, ListValue> {
         Ref::map(self.rc.borrow(), |val| match val {

@@ -82,6 +82,11 @@ impl ValueRef {
             Value::ip_family_value(v) => ValueRef {
                 rc: Rc::new(RefCell::new(Value::ip_family_value(*v))),
             },
+            // Phase C.1: Uuid is `Copy` (16 bytes), no symbolic
+            // state, no box. Same shape as macaddr / ip_family.
+            Value::uuid_value(v) => ValueRef {
+                rc: Rc::new(RefCell::new(Value::uuid_value(*v))),
+            },
             // F2.3: Box<ResolvableString> clones the segment list +
             // every nested Expr inside Symbolic segments. Cheap
             // enough for typical sizes — segment counts are small.

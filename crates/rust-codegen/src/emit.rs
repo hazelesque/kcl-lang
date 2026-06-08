@@ -101,6 +101,18 @@ mod _kcl_codegen_helpers {
             Err(format!("expected IpFamily, got {}", v.type_str()))
         }
     }
+    /// Phase C.1: dispatch ValueRef → `uuid::Uuid`. Same shape as
+    /// the macaddr / ip_family converters above. String coercion
+    /// already ran at schema-validation time (val_type.rs); a wrong-
+    /// shape ValueRef here surfaces the same `expected uuid, got X`
+    /// error.
+    pub fn from_uuid(v: &ValueRef) -> Result<uuid::Uuid, String> {
+        if v.is_uuid() {
+            Ok(v.as_uuid())
+        } else {
+            Err(format!("expected uuid, got {}", v.type_str()))
+        }
+    }
 
     // F2.7b: dispatch ValueRef → Resolvable<T>. The Pending arm
     // catches ResolvableString-shaped values (produced by symbolic
@@ -286,6 +298,7 @@ fn resolvable_variant_name(rust_ty: &str) -> String {
         "macaddr::MacAddr6" => "Macaddr".to_string(),
         "macaddr::MacAddr8" => "Macaddr8".to_string(),
         "kcl_runtime::IpFamily" => "IpFamily".to_string(),
+        "uuid::Uuid" => "Uuid".to_string(),
         other => {
             let last = other.rsplit("::").next().unwrap_or(other);
             let mut chars = last.chars();
@@ -973,6 +986,7 @@ fn emit_conv_closure(kind: &FieldKind) -> String {
         FieldKind::Macaddr => "_kcl_codegen_helpers::from_macaddr".to_string(),
         FieldKind::Macaddr8 => "_kcl_codegen_helpers::from_macaddr8".to_string(),
         FieldKind::IpFamily => "_kcl_codegen_helpers::from_ip_family".to_string(),
+        FieldKind::Uuid => "_kcl_codegen_helpers::from_uuid".to_string(),
         FieldKind::Resolvable(inner) => {
             // F2.7b: dispatch on `is_resolvable_string` first
             // (Pending arm), fall through to the inner T's

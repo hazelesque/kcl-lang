@@ -44,6 +44,10 @@ pub const MOKKAN_TYPE_INET: &str = "inet";
 pub const MOKKAN_TYPE_MACADDR: &str = "macaddr";
 pub const MOKKAN_TYPE_MACADDR8: &str = "macaddr8";
 pub const MOKKAN_TYPE_IP_FAMILY: &str = "IpFamily";
+// Phase C.1: mokkan UUID. PostgreSQL-shaped — standard hyphenated
+// 8-4-4-4-12 text form on the str→uuid coercion path; canonical
+// lowercase output via uuid crate's Display impl.
+pub const MOKKAN_TYPE_UUID: &str = "uuid";
 // F2.3: ResolvableString type name. Used in schema field declarations
 // as `T | ResolvableString` (F2.6 sema registration).
 pub const MOKKAN_TYPE_RESOLVABLE_STRING: &str = "ResolvableString";
@@ -103,6 +107,14 @@ pub fn try_coerce_mokkan_inet(value: &ValueRef, tpe: &str) -> Option<ValueRef> {
         MOKKAN_TYPE_MACADDR8 => macaddr::MacAddr8::from_str(&s)
             .ok()
             .map(|m| ValueRef::from(Value::macaddr8_value(m))),
+        // Phase C.1: str → uuid. Parses standard hyphenated UUID
+        // text (8-4-4-4-12, case-insensitive). The `uuid` crate's
+        // parse is strict about hyphen placement and segment widths;
+        // operator typos surface as the same `expected uuid, got
+        // str` error as the other coercions.
+        MOKKAN_TYPE_UUID => uuid::Uuid::parse_str(&s)
+            .ok()
+            .map(|u| ValueRef::from(Value::uuid_value(u))),
         // F2.6: str → ResolvableString. Wraps the string in a
         // single-Literal segment — the result is fully eager (no
         // symbolic segments), but the type discipline (D5) requires
@@ -142,6 +154,7 @@ impl ValueRef {
             Value::macaddr_value(..) => String::from(MOKKAN_TYPE_MACADDR),
             Value::macaddr8_value(..) => String::from(MOKKAN_TYPE_MACADDR8),
             Value::ip_family_value(..) => String::from(MOKKAN_TYPE_IP_FAMILY),
+            Value::uuid_value(..) => String::from(MOKKAN_TYPE_UUID),
             Value::resolvable_string_value(..) => String::from(MOKKAN_TYPE_RESOLVABLE_STRING),
         }
     }

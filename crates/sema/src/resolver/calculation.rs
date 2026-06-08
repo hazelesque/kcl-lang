@@ -340,10 +340,14 @@ impl<'ctx> Resolver<'ctx> {
         // No ordering wired — these are categorical values; the only
         // useful comparison is identity (e.g.,
         // `family(addr) == V4`).
+        // Phase C.1: uuid added — same shape, identity-only
+        // comparison (uuid_v5 lookups, default-network-uuid bypass
+        // checks, etc.).
         if matches!(op, ast::CmpOp::Eq | ast::CmpOp::NotEq)
             && ((t1.is_ip_family() && t2.is_ip_family())
                 || (t1.is_macaddr() && t2.is_macaddr())
-                || (t1.is_macaddr8() && t2.is_macaddr8()))
+                || (t1.is_macaddr8() && t2.is_macaddr8())
+                || (t1.is_uuid() && t2.is_uuid()))
         {
             return self.bool_ty();
         }

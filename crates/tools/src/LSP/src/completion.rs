@@ -853,6 +853,8 @@ fn type_to_item_kind(ty: &Type) -> Option<KCLCompletionItemKind> {
         | TypeKind::Macaddr
         | TypeKind::Macaddr8
         | TypeKind::IpFamily
+        // Phase C.1: uuid is value-shaped just like the others.
+        | TypeKind::Uuid
         // F2.6: ResolvableString same shape as the other mokkan
         // primitives for LSP — it's just a value-shaped builtin
         // named type from the completion's perspective.

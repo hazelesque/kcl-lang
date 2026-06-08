@@ -37,5 +37,6 @@ tracing-subscriber.workspace = true
 # F1.6 integration tests: exercise the as_cidr / as_inet / as_macaddr
 # / as_macaddr8 / as_ip_family ValueRef accessors against typed
 # values directly (the path the codegen-emitted TryFrom bodies
-# follow).
+# follow). Phase C.1 adds uuid for the matching uuid-type tests.
 macaddr = "1.0"
+uuid = "1.7"

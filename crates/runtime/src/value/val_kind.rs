@@ -23,6 +23,7 @@ impl ValueRef {
             Value::cidr_value(_) | Value::inet_value(_) => Kind::Inet,
             Value::macaddr_value(_) | Value::macaddr8_value(_) => Kind::MacAddr,
             Value::ip_family_value(_) => Kind::IpFamily,
+            Value::uuid_value(_) => Kind::Uuid,
             Value::resolvable_string_value(_) => Kind::ResolvableString,
         }
     }

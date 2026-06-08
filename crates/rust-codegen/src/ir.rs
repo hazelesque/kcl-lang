@@ -180,6 +180,10 @@ pub enum FieldKind {
     /// post-F2 `kcl_*` → `mokkan_*` crate rename; regenerated code
     /// picks up the new path at re-codegen time.)
     IpFamily,
+    /// Phase C.1: mokkan native UUID — emits as `uuid::Uuid`.
+    /// Consumer crate must depend on `uuid = "1"` so the
+    /// round-trip type matches the runtime accessor's return type.
+    Uuid,
     /// F2.7b: `T | ResolvableString` union shape. Codegen emits as
     /// `kcl_embed::resolve::Resolvable<T>` and the generated
     /// TryFrom dispatches on `is_resolvable_string` to pick the
@@ -216,6 +220,7 @@ impl FieldKind {
             FieldKind::Macaddr => "macaddr::MacAddr6".to_string(),
             FieldKind::Macaddr8 => "macaddr::MacAddr8".to_string(),
             FieldKind::IpFamily => "kcl_runtime::IpFamily".to_string(),
+            FieldKind::Uuid => "uuid::Uuid".to_string(),
             FieldKind::Resolvable(inner) => {
                 format!("kcl_embed::resolve::Resolvable<{}>", inner.to_rust_type())
             }
@@ -926,6 +931,7 @@ fn field_kind_for(
         TypeKind::Macaddr => FieldKind::Macaddr,
         TypeKind::Macaddr8 => FieldKind::Macaddr8,
         TypeKind::IpFamily => FieldKind::IpFamily,
+        TypeKind::Uuid => FieldKind::Uuid,
         // F2.6: ResolvableString as a standalone field type isn't
         // useful — the operator wants `T | ResolvableString` (the
         // F2.7 "transparent-resolvable" shape that emits as

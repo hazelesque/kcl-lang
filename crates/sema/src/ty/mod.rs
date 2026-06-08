@@ -92,6 +92,7 @@ impl Type {
             TypeKind::Macaddr => MACADDR_TYPE_STR.to_string(),
             TypeKind::Macaddr8 => MACADDR8_TYPE_STR.to_string(),
             TypeKind::IpFamily => IP_FAMILY_TYPE_STR.to_string(),
+            TypeKind::Uuid => UUID_TYPE_STR.to_string(),
             // F2.6: mokkan deferred-string carrier type.
             TypeKind::ResolvableString => RESOLVABLE_STRING_TYPE_STR.to_string(),
         }
@@ -199,6 +200,12 @@ pub enum TypeKind {
     /// (NetworkDefinition.family, symbolic_subnet signature,
     /// resolver validation). Written as `IpFamily`.
     IpFamily,
+    /// Mokkan (Phase C.1): PostgreSQL-shaped UUID. Written as `uuid`.
+    /// Used for cross-project namespace anchors in Tilley
+    /// (NetworkSubnet.namespace, NetworkAddress.namespace) and any
+    /// future identity-rendezvous shape. No symbolic state — UUIDs
+    /// are values, not handles to resolve.
+    Uuid,
     /// Mokkan (F2.6): deferred-string value carrier. Schemas declare
     /// `field: T | ResolvableString` to opt into accepting symbolic
     /// values that the resolver will substitute at resolve time.
@@ -235,6 +242,8 @@ bitflags::bitflags! {
         const IP_FAMILY = 1 << 20;
         // F2.6: mokkan deferred-string carrier type.
         const RESOLVABLE_STRING = 1 << 21;
+        // Phase C.1: mokkan uuid type.
+        const UUID = 1 << 22;
     }
 }
 

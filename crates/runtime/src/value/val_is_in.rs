@@ -82,6 +82,13 @@ impl ValueRef {
         matches!(&*self.rc.borrow(), Value::ip_family_value(_))
     }
 
+    /// Phase C.1: predicate for `uuid_value`. Mirrors the
+    /// macaddr/ip_family shape — no symbolic state, no extra check.
+    #[inline]
+    pub fn is_uuid(&self) -> bool {
+        matches!(&*self.rc.borrow(), Value::uuid_value(_))
+    }
+
     /// F2.3: predicate for the deferred-string carrier. Distinct
     /// from `is_str` — a `ResolvableString` is structurally a list
     /// of segments, not a single resolved string. Schema fields
@@ -119,6 +126,11 @@ impl ValueRef {
                 | Value::macaddr_value(_)
                 | Value::macaddr8_value(_)
                 | Value::ip_family_value(_)
+                // Phase C.1: uuid is primitive-shaped — single
+                // payload, no symbolic state. Schema fields declared
+                // `field: uuid` accept the coerced uuid_value at
+                // validation time via the same path.
+                | Value::uuid_value(_)
                 // F2.3: ResolvableString is primitive-shaped (single
                 // payload, not a collection). is_builtin lets a field
                 // declared `ResolvableString` accept the value at

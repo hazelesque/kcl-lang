@@ -49,6 +49,10 @@ impl Type {
         Arc::new(Type::IP_FAMILY)
     }
     #[inline]
+    pub fn uuid_ref() -> TypeRef {
+        Arc::new(Type::UUID)
+    }
+    #[inline]
     pub fn resolvable_string_ref() -> TypeRef {
         Arc::new(Type::RESOLVABLE_STRING)
     }
@@ -407,6 +411,7 @@ impl Type {
             | TypeKind::Macaddr
             | TypeKind::Macaddr8
             | TypeKind::IpFamily
+            | TypeKind::Uuid
             | TypeKind::ResolvableString => true,
             TypeKind::Void | TypeKind::Module(_) | TypeKind::Named(_) => false,
         }
@@ -435,6 +440,11 @@ impl Type {
     #[inline]
     pub fn is_ip_family(&self) -> bool {
         self.flags.contains(TypeFlags::IP_FAMILY)
+    }
+    /// Phase C.1: type-check predicate for `uuid`.
+    #[inline]
+    pub fn is_uuid(&self) -> bool {
+        self.flags.contains(TypeFlags::UUID)
     }
     /// F2.6: type-check predicate for `ResolvableString`. Used by
     /// the F2.6 union-discipline validator (a `T | ResolvableString`

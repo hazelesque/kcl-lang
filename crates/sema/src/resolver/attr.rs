@@ -57,6 +57,10 @@ impl<'ctx> Resolver<'_> {
             | TypeKind::Macaddr
             | TypeKind::Macaddr8
             | TypeKind::IpFamily
+            // Phase C.1: uuid is value-shaped — `.to_string()`-style
+            // method-form is wired through builtin/function dispatch
+            // when added, not as attribute access on the value.
+            | TypeKind::Uuid
             // F2.6: ResolvableString is value-shaped, not attribute-
             // shaped — its `segments` field is internal-only
             // (consumed by codegen + resolver, not by KCL source).

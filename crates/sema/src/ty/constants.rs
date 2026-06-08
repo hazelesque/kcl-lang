@@ -31,6 +31,10 @@ pub const INET_TYPE_STR: &str = "inet";
 pub const MACADDR_TYPE_STR: &str = "macaddr";
 pub const MACADDR8_TYPE_STR: &str = "macaddr8";
 pub const IP_FAMILY_TYPE_STR: &str = "IpFamily";
+// Phase C.1: PostgreSQL-shaped UUID. Schema authors write
+// `field: uuid`; str→uuid coercion at schema-validation time
+// parses standard UUID text (hyphenated 8-4-4-4-12).
+pub const UUID_TYPE_STR: &str = "uuid";
 // F2.6: deferred-string carrier. Schemas declare
 // `field: T | ResolvableString` to opt into symbolic-flow
 // acceptance. PascalCase to match how operator-facing builtin
@@ -79,6 +83,7 @@ pub static TYPES_MAPPING: Lazy<IndexMap<String, Type>> = Lazy::new(|| {
     mapping.insert(MACADDR_TYPE_STR.to_string(), Type::MACADDR);
     mapping.insert(MACADDR8_TYPE_STR.to_string(), Type::MACADDR8);
     mapping.insert(IP_FAMILY_TYPE_STR.to_string(), Type::IP_FAMILY);
+    mapping.insert(UUID_TYPE_STR.to_string(), Type::UUID);
     mapping.insert(
         RESOLVABLE_STRING_TYPE_STR.to_string(),
         Type::RESOLVABLE_STRING,
@@ -189,6 +194,13 @@ impl Type {
     pub const IP_FAMILY: Type = Type {
         kind: TypeKind::IpFamily,
         flags: TypeFlags::IP_FAMILY,
+        is_type_alias: false,
+    };
+    /// Type constant `uuid` (Phase C.1). PostgreSQL-shaped UUID, no
+    /// symbolic state.
+    pub const UUID: Type = Type {
+        kind: TypeKind::Uuid,
+        flags: TypeFlags::UUID,
         is_type_alias: false,
     };
     /// Type constant `ResolvableString` (F2.6).

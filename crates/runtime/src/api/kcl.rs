@@ -180,6 +180,8 @@ impl Hash for ValueRef {
             Value::macaddr_value(v) => v.as_bytes().hash(state),
             Value::macaddr8_value(v) => v.as_bytes().hash(state),
             Value::ip_family_value(v) => v.hash(state),
+            // Phase C.1: uuid hashes by its 128-bit byte form.
+            Value::uuid_value(v) => v.as_bytes().hash(state),
             // F2.3: deferred-string value. Hash via the underlying
             // Segment list (derives Hash via Expr's derived Hash);
             // consistent with PartialEq because both fall through to
@@ -246,6 +248,9 @@ pub enum Value {
     macaddr_value(macaddr::MacAddr6),
     macaddr8_value(macaddr::MacAddr8),
     ip_family_value(crate::value::IpFamily),
+    // Phase C.1: mokkan UUID. Bare uuid::Uuid — Copy, 16 bytes, no
+    // symbolic state, no payload box needed.
+    uuid_value(uuid::Uuid),
     // F2.3: deferred-string value carrier. Produced (in F2.4) by
     // stringification (`text` / `host` / `abbrev` / `masklen`) on
     // symbolic operands, and by string concatenation where any
@@ -486,6 +491,8 @@ pub enum Kind {
     // the kind() method still needs to return something for the
     // variant, so we reserve a discriminant.
     ResolvableString = 22,
+    // Phase C.1: mokkan UUID.
+    Uuid = 23,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Default)]

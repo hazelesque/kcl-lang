@@ -147,6 +147,7 @@ impl From<ast::Type> for Type {
                     MACADDR_TYPE_STR => Type::MACADDR,
                     MACADDR8_TYPE_STR => Type::MACADDR8,
                     IP_FAMILY_TYPE_STR => Type::IP_FAMILY,
+                    UUID_TYPE_STR => Type::UUID,
                     RESOLVABLE_STRING_TYPE_STR => Type::RESOLVABLE_STRING,
                     _ => Type::named(&name),
                 }

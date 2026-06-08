@@ -70,6 +70,10 @@ impl ValueRef {
                 (Value::ip_family_value(a), Value::ip_family_value(b)) => a == b,
                 (Value::macaddr_value(a), Value::macaddr_value(b)) => a == b,
                 (Value::macaddr8_value(a), Value::macaddr8_value(b)) => a == b,
+                // Phase C.1: UUID equality is byte-equality (the
+                // uuid crate derives PartialEq on the underlying
+                // 16-byte array; canonical text form is unique).
+                (Value::uuid_value(a), Value::uuid_value(b)) => a == b,
                 _ => false,
             },
         }

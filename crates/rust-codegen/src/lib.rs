@@ -540,11 +540,12 @@ mod tests {
         );
     }
 
-    /// F1.6 — end-to-end: a KCL schema with all five mokkan native
-    /// types round-trips through parser + sema + IR + emitter,
-    /// producing typed Rust fields. Asserts both the struct shape
-    /// (typed Rust types, not the F1.2 Unsupported sentinel) and
-    /// the TryFrom body wiring (the right `from_<type>` helper).
+    /// F1.6 / Phase C.1 — end-to-end: a KCL schema with every mokkan
+    /// native type (cidr/inet/macaddr/macaddr8/IpFamily/uuid)
+    /// round-trips through parser + sema + IR + emitter, producing
+    /// typed Rust fields. Asserts both the struct shape (typed Rust
+    /// types, not the F1.2 Unsupported sentinel) and the TryFrom
+    /// body wiring (the right `from_<type>` helper).
     #[test]
     fn analyse_and_generate_mokkan_typed_inet_fields() {
         let src = concat!(
@@ -554,6 +555,7 @@ mod tests {
             "    mac: macaddr\n",
             "    eui64: macaddr8\n",
             "    family: IpFamily\n",
+            "    namespace?: uuid\n",
         );
         let module = analyse_inline_source(src).expect("analyse");
         let fields = &module.schemas[0].fields;
@@ -562,6 +564,7 @@ mod tests {
         assert!(matches!(fields[2].kind, FieldKind::Macaddr));
         assert!(matches!(fields[3].kind, FieldKind::Macaddr8));
         assert!(matches!(fields[4].kind, FieldKind::IpFamily));
+        assert!(matches!(fields[5].kind, FieldKind::Uuid));
 
         let out = generate_to_string(src).expect("generate");
         assert!(
@@ -584,6 +587,13 @@ mod tests {
             out.contains("pub family: kcl_runtime::IpFamily,"),
             "IpFamily field shape:\n{out}"
         );
+        assert!(
+            out.contains("pub namespace: Option<uuid::Uuid>,"),
+            "uuid field shape:\n{out}"
+        );
+        // Phase C.1: TryFrom body should dispatch through the
+        // codegen-emitted `from_uuid` helper that wraps `as_uuid()`.
+        assert!(out.contains("from_uuid"), "uuid TryFrom dispatch:\n{out}");
     }
 
     /// F2.7b end-to-end: KCL schema declaring
